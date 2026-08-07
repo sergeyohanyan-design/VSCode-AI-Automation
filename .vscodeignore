@@ -1,0 +1,14 @@
+.github/**
+.vscode/**
+.gitignore
+**/*.map
+node_modules/**
+test/**
+*.vsix
+CLA.md
+CONTRIBUTING.md
+COMMERCIAL-LICENSING.md
+AI_Setup.md
+.claude/**
+CLAUDE.md
+PLAN/**

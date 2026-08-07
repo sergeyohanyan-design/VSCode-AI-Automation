@@ -1,0 +1,55 @@
+{
+  "name": "agent-loop",
+  "displayName": "Agent Loop",
+  "description": "One button for a self-routing AI dev loop on a ClickUp board — senses which of Claude/Codex/Grok are available each pass and routes coding, review and landing accordingly.",
+  "version": "1.0.0",
+  "publisher": "sergeyohanyan-design",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other", "SCM Providers"],
+  "keywords": ["ai", "agent", "clickup", "automation", "claude", "codex"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sergeyohanyan-design/VSCode-AI-Automation.git"
+  },
+  "main": "./src/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "scripts": {
+    "selftest": "node test/selftest.js",
+    "test": "node test/selftest.js && node src/agent-loop.mjs --selftest",
+    "package": "vsce package"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentLoop.toggle",
+        "title": "Agent Loop: Start / Safe Stop",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "agentLoop.setup",
+        "title": "Agent Loop: Set up / reconfigure ClickUp"
+      },
+      {
+        "command": "agentLoop.checkBoard",
+        "title": "Agent Loop: Check the ClickUp board"
+      },
+      {
+        "command": "agentLoop.openConfig",
+        "title": "Agent Loop: Open the config file"
+      },
+      {
+        "command": "agentLoop.safeStop",
+        "title": "Agent Loop: Safe Stop (finish the current round, then exit)"
+      },
+      {
+        "command": "agentLoop.forceStop",
+        "title": "Agent Loop: Force Stop (kill now — may leave a task mid-implement)"
+      },
+      {
+        "command": "agentLoop.openStopReport",
+        "title": "Agent Loop: Open last handover report"
+      }
+    ]
+  }
+}

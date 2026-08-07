@@ -33,19 +33,32 @@ try {
 const t = extension.__test;
 assert.ok(t, 'extension.js must expose pure helpers through __test');
 
-const paths = t.resolveStatePaths(
-  {
-    AGENT_LOOP_LOCK: 'D:\\state\\custom.lock',
-    AGENT_LOOP_STOP: 'D:\\state\\custom.stop',
-    AGENT_LOOP_STOP_REPORT: 'D:\\state\\custom-report.md',
-  },
-  'C:\\Users\\Test',
+// What counts as an absolute path is platform-specific — "D:\state" is absolute on Windows and a
+// plain relative name everywhere else — so build the fixture instead of hardcoding one shape. A
+// hardcoded Windows path passes locally and fails the moment CI runs on Linux.
+const ROOT_ABS = process.platform === 'win32' ? 'D:\\state' : '/state';
+const HOME = path.join(ROOT_ABS, 'home');
+const abs = name => path.join(ROOT_ABS, name);
+
+// An absolute override is taken exactly as given.
+assert.deepEqual(
+  t.resolveStatePaths(
+    {
+      AGENT_LOOP_LOCK: abs('custom.lock'),
+      AGENT_LOOP_STOP: abs('custom.stop'),
+      AGENT_LOOP_STOP_REPORT: abs('custom-report.md'),
+    },
+    HOME,
+  ),
+  { lock: abs('custom.lock'), stop: abs('custom.stop'), report: abs('custom-report.md') },
 );
-assert.deepEqual(paths, {
-  lock: 'D:\\state\\custom.lock',
-  stop: 'D:\\state\\custom.stop',
-  report: 'D:\\state\\custom-report.md',
-});
+
+// A RELATIVE override resolves against home, and an absent one falls back to the documented default
+// in home. Both branches are platform-independent, and neither was covered before.
+const mixed = t.resolveStatePaths({ AGENT_LOOP_LOCK: path.join('sub', 'a.lock') }, HOME);
+assert.equal(mixed.lock, path.resolve(HOME, path.join('sub', 'a.lock')));
+assert.equal(mixed.stop, path.join(HOME, '.agent-loop.stop'));
+assert.equal(mixed.report, path.join(HOME, '.agent-loop-stop-report.md'));
 
 const loaded = t.loadStateEnv(
   { AGENT_LOOP_ENV: 'test.env' },

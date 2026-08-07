@@ -992,12 +992,34 @@ async function selftest() {
     && parseQuotaReset('try again in 999 days', NOW) === NOW + QUOTA_BLACKOUT_CAP_MS; // capped
   if (!quotaReset) console.log('  quota-reset parse probe: failed', { qAbs, qNear, qRel });
 
+  // A Codex-down landing is reviewed by Claude, so the commit record must name the reviewer that
+  // actually ran — claiming "Codex approved" turns the board into a false audit trail, and the
+  // loop's whole invariant is that only reviewed work lands. Entries written as a bare SHA by an
+  // older run must still decode, with an unknown (never a defaulted) reviewer.
+  // Mutates the in-memory map only — a selftest must never write the live approved-SHA file.
+  APPROVED_SHAS.set('selftest-attrib-new', { sha: 'abc1234', reviewer: 'claude' });
+  APPROVED_SHAS.set('selftest-attrib-old', 'def5678');
+  const attribution = getApprovedSha('selftest-attrib-new') === 'abc1234'
+    && getApprovedReviewer('selftest-attrib-new') === 'claude'
+    && getApprovedSha('selftest-attrib-old') === 'def5678'
+    && getApprovedReviewer('selftest-attrib-old') === null
+    && approvalPhrase('claude') === 'Claude approved'
+    && approvalPhrase('codex') === 'Codex approved'
+    && approvalPhrase('grok') === 'Grok (self) approved'
+    && approvalPhrase(null) === 'Approved (reviewer not recorded)'
+    && !approvalPhrase('claude').includes('Codex');
+  APPROVED_SHAS.delete('selftest-attrib-new');
+  APPROVED_SHAS.delete('selftest-attrib-old');
+  if (!attribution) console.log('  reviewer attribution probe: failed', {
+    sha: getApprovedSha('selftest-attrib-new'), claude: approvalPhrase('claude'), unknown: approvalPhrase(null),
+  });
+
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
-    && cuRetryClass && quotaReset
+    && cuRetryClass && quotaReset && attribution
     && c && d && e && implementCap && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && branchCheckoutOk && s && t && u && w
     && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && parkedReviewRouting && rollup
     && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication;
-  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset})`);
+  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution})`);
   process.exit(good ? 0 : 1);
 }
 
@@ -2224,7 +2246,7 @@ const resetRounds = id => { ROUNDS.delete(id); saveRounds(); };
 const bumpOpsFailure = id => bumpRounds(`ops:${id}`);
 const resetOpsFailure = id => { ROUNDS.delete(`ops:${id}`); saveRounds(); };
 
-// Persisted Codex-approved SHAs for tasks parked on `approved` (Claude was down at pass time).
+// Persisted reviewer-approved SHAs for tasks parked on `approved` (Claude was down at pass time).
 // Without this, the next land used the live branch tip — any intervening commit could skip review.
 const APPROVED_SHA_FILE = process.env.AGENT_LOOP_APPROVED_SHA || `${homedir()}/.agent-loop-approved-sha.json`;
 const loadApprovedShas = () => {
@@ -2238,9 +2260,25 @@ const saveApprovedShas = () => {
   try { writeFileSync(tmp, JSON.stringify(Object.fromEntries(APPROVED_SHAS))); renameSync(tmp, APPROVED_SHA_FILE); }
   catch (e) { log(`⚠ could NOT persist approved SHAs to ${APPROVED_SHA_FILE} (${e.message})`); }
 };
-const setApprovedSha = (id, sha) => { APPROVED_SHAS.set(id, sha); saveApprovedShas(); };
-const getApprovedSha = id => APPROVED_SHAS.get(id) || null;
+// Records span passes: a task approved in one pass usually lands in a later one, so the reviewer's
+// identity must be persisted with the SHA or the landing comment cannot name who actually approved.
+// Entries were once a bare SHA string; those still read back (with an unknown reviewer) so an
+// in-flight approval written by an older run is not silently dropped on upgrade.
+const readApprovedEntry = id => {
+  const raw = APPROVED_SHAS.get(id);
+  if (!raw) return null;
+  if (typeof raw === 'string') return { sha: raw, reviewer: null };
+  return typeof raw.sha === 'string' ? { sha: raw.sha, reviewer: raw.reviewer || null } : null;
+};
+const setApprovedSha = (id, sha, reviewer = null) => { APPROVED_SHAS.set(id, { sha, reviewer }); saveApprovedShas(); };
+const getApprovedSha = id => readApprovedEntry(id)?.sha || null;
+const getApprovedReviewer = id => readApprovedEntry(id)?.reviewer || null;
 const clearApprovedSha = id => { APPROVED_SHAS.delete(id); saveApprovedShas(); };
+// Single source of truth for how a reviewer is named in comments. "(self)" on Grok because a
+// Grok-reviewed branch was usually also Grok-coded.
+const reviewerLabel = r => (!r ? null : r === 'grok' ? 'Grok (self)' : r[0].toUpperCase() + r.slice(1));
+// An unrecorded reviewer must read as unknown, never as a default name.
+const approvalPhrase = r => (reviewerLabel(r) ? `${reviewerLabel(r)} approved` : 'Approved (reviewer not recorded)');
 
 // ---------- working-tree ownership guard ----------
 // The dispatcher assumes it OWNS the tree: it runs `reset --hard` before each lane and `add -A`
@@ -2644,7 +2682,7 @@ async function reviewAndResolve(t, reviewer, onPass, escalateWithClaude, claudeU
     const diff = diffResult.out;
     if (!diff.trim()) { await tryComment(id, `🟣 **PM** — empty diff vs \`${co.base}\` → blocked.`); await setStatus(id, S.blocked); return; }
 
-    const who   = reviewer === 'grok' ? 'Grok (self)' : reviewer[0].toUpperCase() + reviewer.slice(1);
+    const who   = reviewerLabel(reviewer);
     const emoji = reviewer === 'codex' ? '🟢' : reviewer === 'grok' ? '🔵' : '🟣';
     log(`review ${id} via ${reviewer} (${diff.split('\n').length} diff lines vs ${co.base}) [worktree]`);
 
@@ -2764,7 +2802,7 @@ async function reviewAndResolve(t, reviewer, onPass, escalateWithClaude, claudeU
     if (verdict.verdict === 'pass') {
       const passAction = reviewPassAction(reviewer, onPass);
       if (passAction === 'approved') {
-        setApprovedSha(id, tipBefore);
+        setApprovedSha(id, tipBefore, reviewer);
         await setStatus(id, S.approved);
         const approvalSource = adjudicated
           ? 'Claude adjudication disproved Codex blockers'
@@ -2775,10 +2813,10 @@ async function reviewAndResolve(t, reviewer, onPass, escalateWithClaude, claudeU
       if (passAction === 'commit') {
         // Dispose the review sandbox BEFORE land so verify can open a fresh detached clone at this SHA.
         const reviewedSha = tipBefore;
-        setApprovedSha(id, reviewedSha); // durable even if land is deferred mid-push
+        setApprovedSha(id, reviewedSha, reviewer); // durable even if land is deferred mid-push
         await co.wt.dispose();
         co.wt = null;
-        return land(t, { branch: co.branch, reviewedSha }, escalateWithClaude && claudeUp);
+        return land(t, { branch: co.branch, reviewedSha, reviewer }, escalateWithClaude && claudeUp);
       }
       await tryComment(id, `${emoji} ${who} approved; awaiting Codex before commit → parked on **in review**.`); return setStatus(id, S.review);
     }
@@ -2860,9 +2898,12 @@ async function openVerifySandbox(reviewedSha) {
 
 // ---------- land (Commit/Push) — only ever reached after a Codex pass ----------
 // Always push the exact reviewed SHA (not a mutable branch tip that may have moved since review).
-async function land(t, { branch, reviewedSha }, escalateOnCap = false) {
+async function land(t, { branch, reviewedSha, reviewer = null }, escalateOnCap = false) {
   const id = t.id;
   if (!branch || !reviewedSha) throw new Error(`land(${id}): branch and reviewedSha are required`);
+  // Never assert "Codex approved" — Codex-down landings are reviewed by Claude, and a commit record
+  // naming a reviewer that never ran turns the board's audit trail into a false claim.
+  const approvedBy = approvalPhrase(reviewer);
 
   const tipNow = await revParseAt(REPO, branch);
   if (tipNow !== reviewedSha) {
@@ -2914,7 +2955,7 @@ async function land(t, { branch, reviewedSha }, escalateOnCap = false) {
   if (push.code !== 0) {
     const rounds = bumpRounds(id);
     setApprovedSha(id, reviewedSha); // keep the reviewed pin for retry
-    await tryComment(id, `🟣 **PM** — Codex approved${VERIFY ? ' + verify green' : ''} and \`${sha}\` is committed on \`${branch}\`, but **push FAILED** (round ${rounds}/${MAX_ROUNDS}). Reviewed SHA kept.\n\`\`\`\n${push.out.slice(-600)}\n\`\`\``);
+    await tryComment(id, `🟣 **PM** — ${approvedBy}${VERIFY ? ' + verify green' : ''} and \`${sha}\` is committed on \`${branch}\`, but **push FAILED** (round ${rounds}/${MAX_ROUNDS}). Reviewed SHA kept.\n\`\`\`\n${push.out.slice(-600)}\n\`\`\``);
     log(`  ${id} push FAILED (${sha} local only) → round ${rounds}/${MAX_ROUNDS}`);
     if (rounds >= MAX_ROUNDS) {
       await tryComment(id, `🛑 **PM** — push failed ${MAX_ROUNDS} times with commits still local on \`${branch}\` (\`${sha}\`) → **blocked** for a human.`);
@@ -2926,7 +2967,7 @@ async function land(t, { branch, reviewedSha }, escalateOnCap = false) {
   }
   clearApprovedSha(id);
   resetOpsFailure(id);
-  await tryComment(id, `🟣 **PM** — Codex approved${VERIFY ? ' + verify green' : ''}. \`${sha}\` on \`${branch}\` (pushed). → **committed**. Deploy is human-gated.`);
+  await tryComment(id, `🟣 **PM** — ${approvedBy}${VERIFY ? ' + verify green' : ''}. \`${sha}\` on \`${branch}\` (pushed). → **committed**. Deploy is human-gated.`);
   await setStatus(id, S.committed);
   resetRounds(id);
   log(`review ${id} committed (${sha}, pushed)`);
@@ -3400,19 +3441,20 @@ async function pass() {
         const tip = await revParseAt(REPO, branch);
         if (!pinned) {
           // Cannot trust the live tip as "reviewed" — force Codex again.
-          await tryComment(t.id, `🟣 **PM** — approved without a persisted reviewed SHA → back to **in review** for Codex re-check.`);
+          await tryComment(t.id, `🟣 **PM** — approved without a persisted reviewed SHA → back to **in review** for re-review (Codex when it is up, otherwise Claude on a diff it did not write).`);
           await setStatus(t.id, S.review);
           failedApproved.add(t.id);
           continue;
         }
         if (tip !== pinned) {
+          const approver = reviewerLabel(getApprovedReviewer(t.id));
           clearApprovedSha(t.id);
-          await tryComment(t.id, `🟣 **PM** — branch \`${branch}\` moved since Codex approval (\`${pinned.slice(0, 8)}\` → \`${tip.slice(0, 8)}\`) → **in review** (will not push unreviewed commits).`);
+          await tryComment(t.id, `🟣 **PM** — branch \`${branch}\` moved since ${approver ? `${approver}'s` : 'the'} approval (\`${pinned.slice(0, 8)}\` → \`${tip.slice(0, 8)}\`) → **in review** (will not push unreviewed commits).`);
           await setStatus(t.id, S.review);
           failedApproved.add(t.id);
           continue;
         }
-        const landed = await land(t, { branch, reviewedSha: pinned }, true);
+        const landed = await land(t, { branch, reviewedSha: pinned, reviewer: getApprovedReviewer(t.id) }, true);
         if (landed) resetOpsFailure(t.id);
         else failedApproved.add(t.id);
       } catch (e) {

@@ -66,11 +66,27 @@ The extension ships the dispatcher inside itself. Your repository needs nothing 
 
 ---
 
-## Setup
+## Install
+
+Download the `.vsix` from the
+**[latest release](https://github.com/sergeyohanyan-design/VSCode-AI-Automation/releases/latest)**,
+then:
 
 ```
-code --install-extension agent-loop-1.0.0.vsix
+code --install-extension agent-loop-<version>.vsix
 ```
+
+Or in VS Code: Extensions → `…` menu → *Install from VSIX…*
+
+> A `.vsix` install does **not** auto-update. To move to a new version, download it and install again.
+
+Building it yourself instead — no dependencies, Node 18+ is all you need:
+
+```
+npm test && npx @vscode/vsce package
+```
+
+## Setup
 
 Then click **Agent Loop: set up** in the status bar and follow the wizard. It validates your token,
 creates the ClickUp list, and tells you exactly which statuses and custom fields to add by hand —

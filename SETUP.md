@@ -40,20 +40,23 @@ One agent is enough to start and see the thing work. Two are enough to land code
 
 ## 1. Install the extension
 
-**From a `.vsix`** (the normal path today):
+**From a `.vsix`** (the normal path today). Download it from the
+[latest release](https://github.com/sergeyohanyan-design/VSCode-AI-Automation/releases/latest), then:
 
 ```
-code --install-extension agent-loop-1.0.0.vsix
+code --install-extension agent-loop-<version>.vsix
 ```
 
 Or in VS Code: Extensions → `…` menu → *Install from VSIX…*
 
-**From source**, if you cloned this repo:
+Note that a `.vsix` install never auto-updates — to take a new version you download and install again.
+
+**From source**, if you cloned this repo. There are no dependencies to install:
 
 ```
-npm install -g @vscode/vsce
-vsce package
-code --install-extension agent-loop-1.0.0.vsix
+npm test
+npx @vscode/vsce package
+code --install-extension agent-loop-<version>.vsix
 ```
 
 Reload the window. A **`$(gear) Agent Loop: set up`** item appears at the

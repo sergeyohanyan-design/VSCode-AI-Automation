@@ -1,0 +1,77 @@
+# Builds the .vsix from the tagged commit and publishes it as a release asset.
+#
+# The point is that the downloadable artifact can never drift from the source: it is built here, from
+# the tag, rather than uploaded by hand from someone's laptop. Push a tag, get a release.
+#
+#     npm version 1.0.1 --no-git-tag-version   # or edit package.json
+#     git commit -am "release: v1.0.1" && git push
+#     git tag v1.0.1 && git push origin v1.0.1
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write        # needed to create the release and upload the asset
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # No `npm ci`: this extension has zero dependencies and ships no lockfile.
+
+      # A tag that disagrees with the manifest produces an asset whose filename lies about what is
+      # inside it. Fail here rather than publish it.
+      - name: Tag must match package.json version
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag v$TAG does not match package.json version $PKG"
+            exit 1
+          fi
+          echo "version=$PKG" >> "$GITHUB_OUTPUT"
+          echo "releasing v$PKG"
+
+      # Runs the redistribution guards (no token, machine path or ClickUp id in any shipped file) and
+      # the config-drift guard (every env key the dispatcher reads is documented). These are exactly
+      # the checks that must not be skipped on a publish.
+      #
+      # The dispatcher's own `node src/agent-loop.mjs --selftest` is deliberately NOT run here: it
+      # spawns real processes and exercises OS-specific process-tree kills, and has only been
+      # verified on Windows. Run it locally before tagging.
+      - name: Selftest
+        run: npm run selftest
+
+      - name: Package
+        run: npx --yes @vscode/vsce package --allow-missing-repository
+
+      # Published in the release body so anyone can verify the download.
+      - name: Checksum
+        run: sha256sum *.vsix | tee SHA256SUMS.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.vsix
+            SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            Install: download the `.vsix` below, then
+
+            ```
+            code --install-extension agent-loop-${{ steps.version.outputs.version }}.vsix
+            ```
+
+            or in VS Code: Extensions → `…` → *Install from VSIX…*
+
+            A `.vsix` install does not auto-update. Verify the download against `SHA256SUMS.txt`.

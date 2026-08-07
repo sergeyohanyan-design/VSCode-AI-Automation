@@ -212,6 +212,21 @@ for (const required of ['src/extension.js', 'src/setup.js', 'src/agent-loop.mjs'
 const pkg = require(path.join(ROOT, 'package.json'));
 assert.equal(pkg.main, './src/extension.js');
 assert.equal(pkg.license, 'SEE LICENSE IN LICENSE.md');
+
+// The icon is easy to lose silently — a wrong path, or .vscodeignore swallowing images/ — and the
+// only symptom is a grey placeholder on the Marketplace listing. Assert it is declared, present, and
+// a PNG of at least the 128px the Marketplace requires. The PNG header carries the dimensions at a
+// fixed offset, so this needs no image library.
+assert.ok(pkg.icon, 'package.json declares no icon');
+const iconPath = path.join(ROOT, pkg.icon);
+assert.ok(fs.existsSync(iconPath), `icon missing at ${pkg.icon}`);
+assert.ok(!ignore.some(rule => rule === pkg.icon || rule === `${pkg.icon.split('/')[0]}/**`),
+  `.vscodeignore would exclude ${pkg.icon} from the .vsix`);
+const png = fs.readFileSync(iconPath);
+assert.equal(png.subarray(1, 4).toString('ascii'), 'PNG', 'the icon must be a real PNG');
+const [iw, ih] = [png.readUInt32BE(16), png.readUInt32BE(20)];
+assert.equal(iw, ih, `icon must be square, got ${iw}x${ih}`);
+assert.ok(iw >= 128, `icon must be at least 128px, got ${iw}px`);
 for (const cmd of ['agentLoop.toggle', 'agentLoop.setup', 'agentLoop.checkBoard', 'agentLoop.openConfig', 'agentLoop.safeStop', 'agentLoop.forceStop', 'agentLoop.openStopReport']) {
   assert.ok(pkg.contributes.commands.some(c => c.command === cmd), `package.json does not contribute ${cmd}`);
 }

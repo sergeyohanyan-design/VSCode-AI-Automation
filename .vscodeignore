@@ -5,6 +5,7 @@
 node_modules/**
 test/**
 *.vsix
+images/icon-source.jpg
 CLA.md
 CONTRIBUTING.md
 COMMERCIAL-LICENSING.md

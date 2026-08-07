@@ -1,0 +1,16 @@
+node_modules/
+*.vsix
+
+# The real config lives OUTSIDE the repo (~/.agent-loop.env by default). If you ever keep a copy
+# here for convenience, it must never be committed — it holds your ClickUp API token.
+.agent-loop.env
+*.env
+!*.env.example
+
+# Local dispatcher state, in case anyone points AGENT_LOOP_* at the working tree.
+.agent-loop.lock
+.agent-loop.stop
+.agent-loop.log
+.agent-loop-rounds.json
+.agent-loop-approved-sha.json
+.agent-loop-stop-report.md

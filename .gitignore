@@ -14,3 +14,10 @@ node_modules/
 .agent-loop-rounds.json
 .agent-loop-approved-sha.json
 .agent-loop-stop-report.md
+
+# Machine-specific Claude Code config. settings.json is ignored too: every
+# permission approval is appended to it verbatim, so it goes dirty on nearly
+# every session. Claude Code still reads both files from disk regardless of git.
+.claude/settings.json
+.claude/settings.local.json
+.claude/worktrees/

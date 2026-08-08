@@ -27,9 +27,54 @@
 //  once, or every run fails on a missing dependency unrelated to the diff.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const BASE = process.env.AGENT_LOOP_BASE || 'main';
+
+// ─── Test-environment parity — read before you export a single variable here ──
+//
+//  Whatever this process puts in the environment WINS over the *non-forced* env
+//  declarations in your test config: phpunit's `<env name="…" value="…"/>`
+//  (force="false" is the default), pytest-env, dotenv's "never override what is
+//  already set", and most others behave the same way. So a harness that pins a
+//  database variable — usually to make local runs fast — silently runs the whole
+//  suite on a different engine than CI and production, and its green verdict
+//  then proves nothing about production. Engine-specific bugs live exactly in
+//  that gap: placeholder binding, collation, transactional DDL, JSON operators.
+//
+//  This file therefore hardcodes NO engine and NO database variable, because it
+//  cannot know yours. If your suite needs environment, point it at the SAME file
+//  CI uses and let the values come from there:
+//
+//      AGENT_LOOP_VERIFY_ENV_FILE=/absolute/path/to/.env.testing
+//
+//  That file is usually gitignored, so it does not exist in a fresh checkout —
+//  either give an absolute path outside the repo, or name it in
+//  AGENT_LOOP_VERIFY_SEED_DIRS.
+const ENV_FILE = process.env.AGENT_LOOP_VERIFY_ENV_FILE || '';
+if (ENV_FILE) {
+  // Fail closed. Continuing without the file would fall back to whatever engine
+  // the ambient environment happens to name — the exact mismatch this prevents.
+  if (!existsSync(ENV_FILE)) {
+    console.error(`verify: AGENT_LOOP_VERIFY_ENV_FILE not found: ${ENV_FILE}`);
+    process.exit(1);
+  }
+  const loaded = [];
+  for (const line of readFileSync(ENV_FILE, 'utf8').split(/\r?\n/)) {
+    // Deliberately overrides an existing value: parity with CI is the point, so
+    // a stray shell export must not win over the file CI actually runs from.
+    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (!m) continue;
+    process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+    loaded.push(m[1]);
+  }
+  // Print it. Which engine the suite ran against is otherwise invisible in the
+  // log, and that invisibility is how a mismatch survives for months.
+  console.log(`verify: environment from ${ENV_FILE}`);
+  for (const k of loaded) {
+    console.log(`  ${k}=${/pass|secret|token|key/i.test(k) ? '***' : process.env[k]}`);
+  }
+}
 
 // Which suites exist, and which paths make each one relevant. Order matters:
 // cheapest and most likely to fail first, so a broken commit is rejected fast.

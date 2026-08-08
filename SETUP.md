@@ -182,6 +182,18 @@ that has nothing to do with the diff:
 AGENT_LOOP_VERIFY_SEED_DIRS=node_modules,vendor
 ```
 
+**Make verify run the same stack as CI.** Whatever the verify process exports
+wins over the non-forced env declarations in your test config — phpunit's
+`<env>` defaults to `force="false"`, and pytest-env and dotenv likewise yield to
+an already-set value. Pin a database variable anywhere in that chain and your
+suite quietly runs on a different engine than CI and production, so a green
+verify proves nothing about production. Nothing in Agent Loop hardcodes an
+engine; point it at the same environment file CI uses:
+
+```
+AGENT_LOOP_VERIFY_ENV_FILE=/absolute/path/to/.env.testing
+```
+
 Optionally add a **project contract** at `tools/agent-loop.contract.md` in your
 repo — a short, imperative list of standing rules appended to every implement and
 review prompt. See [`examples/agent-loop.contract.example.md`](./examples/agent-loop.contract.example.md).

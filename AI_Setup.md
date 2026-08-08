@@ -77,6 +77,24 @@ list and let me correct it.
   fresh checkout, which has none of them, so anything missing here makes every
   single verification fail on a missing dependency unrelated to the change. This
   becomes `AGENT_LOOP_VERIFY_SEED_DIRS`.
+- **The environment the suite needs, and whether it matches CI.** If the tests
+  need a database, a queue or a cache, find out which engine **CI and production
+  actually use**, then check what the suite would use here. Read the test config
+  (`phpunit.xml`, `pytest.ini`/`tox.ini`, `jest.config`, `.env.testing`) against
+  the CI workflow.
+
+  This matters more than it looks. Most test configs declare environment
+  *weakly* — phpunit's `<env>` defaults to `force="false"`, pytest-env and dotenv
+  both yield to an already-set value — so any variable present in the
+  environment when the suite starts wins. A test command or harness that pins a
+  database engine therefore verifies a stack production does not run, and its
+  green result proves nothing. Tell me if you find that mismatch here.
+
+  The fix is never to hardcode an engine in the loop's config: set
+  `AGENT_LOOP_VERIFY_ENV_FILE` to the same environment file CI loads. Note that
+  the file is usually gitignored and verification runs in a fresh checkout, so
+  give an absolute path outside the repo or add it to `AGENT_LOOP_VERIFY_SEED_DIRS`.
+
 - **Whether the test suite is slow.** If a full run takes more than about 20
   minutes, say so — `AGENT_LOOP_VERIFY_TIMEOUT_S` needs raising, or the command
   needs narrowing.

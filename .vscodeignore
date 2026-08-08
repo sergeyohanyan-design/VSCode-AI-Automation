@@ -8,6 +8,7 @@ test/**
 *.vsix
 images/icon-source.jpg
 CLA.md
+CLAUDE.md
 CONTRIBUTING.md
 COMMERCIAL-LICENSING.md
 AI_Setup.md

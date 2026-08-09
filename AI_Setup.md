@@ -115,7 +115,18 @@ endpoint for creating statuses or custom fields. Give me the checklist:
    `committed` is Active, every chained task waits forever and nothing explains why.
 4. Add two custom fields: **`Acceptance Criteria`** (long text) and
    **`Blocked By`** (Tasks relationship).
-5. Have me send you the list ID from the URL: `https://app.clickup.com/<team>/v/li/<LIST_ID>`.
+5. Tell me that `Blocked By` is not bookkeeping: it decides where a task's branch
+   forks from. A landed task is pushed to its own branch and never merged into the
+   base branch — that is human-gated — so a prerequisite's code exists ONLY on the
+   prerequisite's branch. With the edge recorded, the successor forks from that
+   branch and inherits the work; without it, the successor forks from a base branch
+   that lacks the prerequisite and its coder burns every allowed round concluding
+   the prerequisite "does not exist". Warn me specifically that when I split a
+   stalled task into subtasks by hand, I must add the edges back into the chain, or
+   the new subtasks are orphans. When two finished prerequisites still sit on
+   separate branches, no single fork base holds both and the task is parked on
+   `blocked` naming them — I integrate, then return it to `ready`.
+6. Have me send you the list ID from the URL: `https://app.clickup.com/<team>/v/li/<LIST_ID>`.
 
 ### Phase 4 — Write the config
 

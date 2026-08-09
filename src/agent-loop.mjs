@@ -813,6 +813,31 @@ async function selftest() {
     ));
   if (!rescopePremise) console.log('  re-scope premise probe: failed', { partialRounds, partial: rescopePartial.slice(0, 400) });
 
+  // The re-scope sandbox physically cannot see sibling task branches (hardenSandboxGit strips the
+  // remote and its refs), so "I could not find the prerequisite" is an observation Claude is not
+  // entitled to draw a conclusion from. Both premises must carry the warning, or a chained task whose
+  // predecessor is merely unmerged gets diagnosed as needing a split it does not need.
+  const rescopeBlindSpot = [rescopeFull, rescopePartial].every(p =>
+    p.includes('SANDBOX BLIND SPOT')
+    && p.includes('Never conclude that a prerequisite does not exist')
+    && p.includes(BASE));
+  if (!rescopeBlindSpot) console.log('  re-scope sandbox blind-spot probe: failed');
+
+  // A successor may only fork off a predecessor branch when exactly ONE predecessor still carries
+  // unmerged work. Zero → BASE (their commits are already there). Two or more → refuse: no single
+  // base holds both, and silently taking BASE hands the coder a tree with neither prerequisite.
+  const chainOne = chainBaseFrom(['agent-loop/task-parent']);
+  const chainNone = chainBaseFrom([null, null]);
+  const chainDup = chainBaseFrom(['agent-loop/task-parent', 'agent-loop/task-parent']);
+  const chainMany = chainBaseFrom(['agent-loop/task-a', null, 'agent-loop/task-b']);
+  const chainBaseSelection = chainOne.base === 'agent-loop/task-parent' && !chainOne.ambiguous
+    && chainNone.base === null && !chainNone.ambiguous
+    && chainBaseFrom([]).base === null
+    // The same predecessor named twice is one base, not a conflict.
+    && chainDup.base === 'agent-loop/task-parent' && !chainDup.ambiguous
+    && chainMany.base === null && chainMany.ambiguous?.join(',') === 'agent-loop/task-a,agent-loop/task-b';
+  if (!chainBaseSelection) console.log('  chain-base selection probe: failed', { chainOne, chainNone, chainDup, chainMany });
+
   // A task parked on `in review` may be handed to Claude only when the branch proves Claude wrote
   // none of it. The grok fixture is the verbatim R3/7 commit subject that exposed this: a PARTIAL
   // commit from a wrap-up timeout is still an attributable commit.
@@ -1017,9 +1042,9 @@ async function selftest() {
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
     && cuRetryClass && quotaReset && attribution
     && c && d && e && implementCap && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && branchCheckoutOk && s && t && u && w
-    && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && parkedReviewRouting && rollup
+    && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && chainBaseSelection && parkedReviewRouting && rollup
     && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication;
-  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution})`);
+  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution})`);
   process.exit(good ? 0 : 1);
 }
 
@@ -1503,19 +1528,34 @@ async function depsSatisfied(t) {
   }
   return true;
 }
-async function resolveChainBase(t) {   // fork/diff base: the one dependency-satisfying blocker's branch, else BASE
+// One fork base cannot carry two unmerged predecessors. land() pushes each task branch and NEVER
+// merges to BASE, so a satisfied predecessor's commits live only on its own branch until a human
+// integrates them. With several such predecessors, the old `ids.length !== 1 → null` silently fell
+// back to BASE and the successor inherited NONE of their work — then burned its whole round budget
+// rediscovering that its prerequisite "does not exist", which was true on its branch and false in the
+// repository. Refuse and name the branches instead of guessing one.
+export function chainBaseFrom(branches) {
+  const uniq = [...new Set((branches || []).filter(Boolean))];
+  if (uniq.length > 1) return { base: null, ambiguous: uniq };
+  return { base: uniq[0] ?? null };
+}
+async function resolveChainBase(t) {   // fork/diff base: a dependency-satisfying blocker's branch, else BASE
   const ids = blockerIds(t);
-  if (ids.length !== 1) return null;
-  // Do not turn a transient ClickUp failure into "no blocker": using BASE in that case can compare a
-  // chained branch against main, mistake inherited predecessor commits for this task's work, and
-  // park an empty task on review. Let the bounded pass retry with authoritative dependency data.
-  const b = await getTask(ids[0]);
-  if (!b || !dependencySatisfied(b)) return null;
-  // findExistingBranchOf (not existingBranchOf): a satisfied predecessor with NO branch on disk did
-  // its work outside a lane — a human task, or one already merged and pruned — so its commits are on
-  // BASE. existingBranchOf would invent the never-created branch name and every caller's `?? BASE`
-  // would be bypassed, forking the successor off a ref that does not exist → instant `blocked`.
-  return findExistingBranchOf(b);   // the predecessor may predate the ID suffix — resolve what's on disk
+  if (!ids.length) return { base: null };
+  const branches = [];
+  for (const bid of ids) {
+    // Do not turn a transient ClickUp failure into "no blocker": using BASE in that case can compare a
+    // chained branch against main, mistake inherited predecessor commits for this task's work, and
+    // park an empty task on review. Let the bounded pass retry with authoritative dependency data.
+    const b = await getTask(bid);
+    if (!b || !dependencySatisfied(b)) return { base: null };
+    // findExistingBranchOf (not existingBranchOf): a satisfied predecessor with NO branch on disk did
+    // its work outside a lane — a human task, or one already merged and pruned — so its commits are on
+    // BASE. existingBranchOf would invent the never-created branch name and every caller's `?? BASE`
+    // would be bypassed, forking the successor off a ref that does not exist → instant `blocked`.
+    branches.push(await findExistingBranchOf(b));   // predecessors may predate the ID suffix — resolve what's on disk
+  }
+  return chainBaseFrom(branches);
 }
 async function latestChangesComment(id) {
   const { comments = [] } = await getComments(id);
@@ -1967,7 +2007,7 @@ async function findExistingBranchOf(t) {
 async function parkedReviewCoders(t) {
   const branch = await findExistingBranchOf(t);
   if (!branch) return null;
-  const base = (await resolveChainBase(t)) ?? BASE;
+  const base = (await resolveChainBase(t)).base ?? BASE;
   const out = await git(`log --format=%B%x00 ${base}..${branch}`);
   if (out.code !== 0) return null;
   return codersFromCommits(out.out.split('\0').map(s => s.trim()).filter(Boolean));
@@ -2105,6 +2145,8 @@ IMPORTANT: it stalled WITHOUT exhausting its round budget, so churn is NOT estab
 ` : `
 It has failed review every allowed round without converging — it is likely too big or mis-scoped.
 `}
+
+SANDBOX BLIND SPOT — read before concluding anything is missing: you are in an isolated clone holding ONLY this task's branch and \`${BASE}\`. Every sibling task branch has been removed, and finished predecessor work is pushed to its own branch and NEVER merged into \`${BASE}\` until a human integrates it. So a prerequisite built by another task is invisible here BY CONSTRUCTION. Never conclude that a prerequisite does not exist, was never built, or must be re-specified because you cannot find it in this tree — that inference is unavailable to you. If the task depends on something you cannot see, say the diagnosis is blocked on integration and recommend that, not a split.
 
 ACCEPTANCE CRITERIA:
 ${ac || '(none)'}
@@ -2463,8 +2505,18 @@ async function implement(t, coder) {
   const existingBranch = await findExistingBranchOf(t);
   const branch = fixing ? existingBranch : branchOf(t);
 
+  // Resolved ONCE for the whole fresh-fork path (refusal message and the fork itself): it costs a
+  // ClickUp read per blocker, and asking twice mid-pass could even answer differently.
+  let base = BASE;
   if (!fixing) {
-    const base = (await resolveChainBase(t)) ?? BASE;
+    const chain = await resolveChainBase(t);
+    if (chain.ambiguous) {
+      log(`🛑 REFUSING fresh fork of ${id}: ${chain.ambiguous.length} satisfied blockers still carry unmerged branches (${chain.ambiguous.join(', ')}) — no single fork base holds them all`);
+      await setStatus(id, S.blocked);
+      await tryComment(id, `🟣 **PM** — refused to fork \`${branch}\`: ${chain.ambiguous.length} predecessors are done but still sit on their own branches (${chain.ambiguous.map(b => `\`${b}\``).join(', ')}), and \`${BASE}\` carries none of their work. Forking from \`${BASE}\` would hand the coder a tree missing every prerequisite → **blocked**. Integrate those branches (into \`${BASE}\`, or into one another so a single branch holds the chain), then return this to **ready**.`);
+      return false;
+    }
+    base = chain.base ?? BASE;
     const plan = freshForkPlan({ branchExists: !!existingBranch, commitsBeyondBase: 0 });
     if (plan.mode === 'refuse') {
       let commits = 0;
@@ -2499,7 +2551,6 @@ async function implement(t, coder) {
       return false;
     }
   } else {
-    const base = (await resolveChainBase(t)) ?? BASE;
     if (base !== BASE) log(`  ${id} chaining onto predecessor branch \`${base}\``);
     // The agent's branch lives in the sandbox; the primary repo gains the real commits via FF import
     // after the commit. publishBranchRef parks a ref at base FIRST so the branch is visible in the

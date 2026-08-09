@@ -54,8 +54,11 @@ Beyond the routing, the parts that matter in practice:
 - **Safe Stop.** Click the button while it runs and it finishes the round it is in, never
   interrupting an agent mid-task, writes a handover report, and exits with the tree and board
   consistent.
-- **Dependency chaining.** A task with exactly one completed blocker forks its branch from that
-  blocker, so sequential work accumulates and reviewers still see only each task's own increment.
+- **Dependency chaining.** A task whose completed blockers left exactly one unmerged branch forks
+  from that branch, so sequential work accumulates and reviewers still see only each task's own
+  increment. Landing pushes each task branch and never merges to `main`, so when two finished
+  predecessors still sit on separate branches no single fork base holds both — the task is parked on
+  `blocked` naming them, instead of quietly forking from `main` with neither prerequisite present.
 
 ---
 

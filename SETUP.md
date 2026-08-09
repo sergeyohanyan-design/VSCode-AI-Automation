@@ -125,7 +125,7 @@ ready → coding → in review → changes requested → approved → committed
 | `blocked` | Active | Needs a human. Not part of normal flow. |
 | `stalled` | Active | Churned too many review rounds without converging. |
 | `approved` | Active | Reviewed and signed off, waiting to be landed. |
-| `committed` | **Done** | Reviewed and pushed to the base branch. |
+| `committed` | **Done** | Reviewed and pushed — to its own task branch. Merging into the base branch is human-gated, so the work is *not* on `main` yet. |
 
 > **`committed` must be created in the "Done" category, not "Active".** Dependency
 > gating only treats done/closed-type statuses as "this blocker is finished". Get
@@ -143,6 +143,15 @@ Both are matched by **name**, so spelling matters (case does not).
 |---|---|---|
 | `Acceptance Criteria` | Text (long) | The actual spec. The task *name* is only a label used to derive the branch name. |
 | `Blocked By` | Tasks (relationship) | Prerequisite tasks. ClickUp's native "waiting on" dependency works too, and does not consume custom-field usages. |
+
+> **Record every prerequisite edge, especially on tasks you split by hand.** The
+> edge is not bookkeeping — it is what makes a task fork from its predecessor's
+> branch instead of from `main`. A task missing the edge starts from a `main` that
+> does not contain its prerequisite, and the coder spends its whole round budget
+> concluding the prerequisite "does not exist" — true on its branch, false in the
+> repository. When two finished prerequisites still sit on separate branches, no
+> single fork base holds both: the task is parked on `blocked` naming them, and
+> you integrate before returning it to `ready`.
 
 Then run **Agent Loop: Check the ClickUp board** until it reports everything
 present. You can also check from a terminal, which spawns no agents and writes

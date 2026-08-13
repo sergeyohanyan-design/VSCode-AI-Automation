@@ -2420,7 +2420,7 @@ async function checkoutForReview(t) {   // → { branch, base, wt } or null if t
     await tryComment(t.id, `🟣 **PM** — no local task branch exists → **blocked** instead of retrying forever.`);
     return null;
   }
-  const base = (await resolveChainBase(t)) ?? BASE;
+  const base = (await resolveChainBase(t)).base ?? BASE;
   // The diff base gets referenced by name (`git diff ${base}`) AFTER this worktree is hardened, so
   // it must be materialized as a local branch now, before hardening removes the remote it lives on.
   const wt = await openTaskWorktree(branch, { alsoBranch: base });
@@ -2683,7 +2683,7 @@ async function implement(t, coder) {
       throw new FatalLoopError(`implementation ${id}: staged-diff failed; worktree PRESERVED at ${wt.dir}`);
     }
     if (!staged.out.trim()) {
-      const base = (await resolveChainBase(t)) ?? BASE;
+      const base = (await resolveChainBase(t)).base ?? BASE;
       // A failed count must not manufacture a review: fall back to 0 (stall), the conservative side.
       const count = await git(`rev-list --count ${base}..${branch}`);
       const commits = count.code === 0 ? Number(count.out.trim()) || 0 : 0;
@@ -2728,7 +2728,11 @@ async function reviewAndResolve(t, reviewer, onPass, escalateWithClaude, claudeU
   let keepWorktree = false;
   try {
     const tipBefore = await revParseAt(REPO, co.branch);
-    const diffResult = await gAt(`diff ${co.base}`);
+    // Three-dot: diff from the MERGE BASE, not from the base branch's current tip. With two-dot,
+    // any commit that lands on the base while this task branch is open shows up in the review diff
+    // as a deletion BY the branch — the reviewer then fails the task for "reverting" unrelated work
+    // it never touched, and the implementer correctly refuses to fix it, so the round is burned.
+    const diffResult = await gAt(`diff ${co.base}...`);
     if (diffResult.code !== 0) throw new Error(`could not diff ${co.branch} against ${co.base} (git exit ${diffResult.code}: ${diffResult.out.trim().slice(0, 240)})`);
     const diff = diffResult.out;
     if (!diff.trim()) { await tryComment(id, `🟣 **PM** — empty diff vs \`${co.base}\` → blocked.`); await setStatus(id, S.blocked); return; }
@@ -3202,7 +3206,7 @@ async function implementQueue() {
 async function branchCommitsBeyondBase(t) {
   const branch = await findExistingBranchOf(t);
   if (!branch) return null;
-  const base = (await resolveChainBase(t)) ?? BASE;
+  const base = (await resolveChainBase(t)).base ?? BASE;
   const r = await git(`rev-list --count ${base}..${branch}`);
   if (r.code !== 0) throw new Error(`could not inspect commits on ${branch} beyond ${base} (git exit ${r.code}: ${r.out.trim().slice(0, 240)})`);
   return { branch, base, commits: Number(r.out.trim()) || 0 };

@@ -78,9 +78,28 @@ The extension ships the dispatcher inside itself. Your repository needs nothing 
 
 ## Install
 
-Download the `.vsix` from the
-**[latest release](https://github.com/sergeyohanyan-design/VSCode-AI-Automation/releases/latest)**,
-then:
+Search **Agent Loop** in your editor's Extensions panel, or install from the command line.
+Either way the editor keeps it up to date for you.
+
+**VS Code** — [Marketplace listing](https://marketplace.visualstudio.com/items?itemName=SergeyOhanyan.agent-loop)
+
+```
+code --install-extension SergeyOhanyan.agent-loop
+```
+
+**Cursor, VSCodium, Windsurf** — these do not use the Microsoft Marketplace, so they pull the same
+extension from [Open VSX](https://open-vsx.org/extension/SergeyOhanyan/agent-loop)
+
+```
+cursor --install-extension SergeyOhanyan.agent-loop
+```
+
+<details>
+<summary><b>Installing the <code>.vsix</code> by hand</b> — for an air-gapped machine, or to pin a version</summary>
+
+Download it from the
+[latest release](https://github.com/sergeyohanyan-design/VSCode-AI-Automation/releases/latest) and
+verify it against `SHA256SUMS.txt`, then:
 
 ```
 code --install-extension agent-loop-<version>.vsix
@@ -88,7 +107,10 @@ code --install-extension agent-loop-<version>.vsix
 
 Or in VS Code: Extensions → `…` menu → *Install from VSIX…*
 
-> A `.vsix` install does **not** auto-update. To move to a new version, download it and install again.
+> A hand-installed `.vsix` does **not** auto-update — that is the one thing you give up by taking
+> this path. To move to a new version, download and install it again.
+
+</details>
 
 Building it yourself instead — no dependencies, Node 18+ is all you need:
 

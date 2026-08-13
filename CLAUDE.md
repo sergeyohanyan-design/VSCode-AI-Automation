@@ -2,10 +2,11 @@
 
 ## The release rule — mandatory, every time
 
-Any change to the tool ships as a release. Not "when it feels significant" — the
-tool is distributed as a `.vsix` that does **not** auto-update, so a fix that is
-only on `main` reaches nobody. Every time work lands on `src/`, `examples/`, the
-config example, or the docs:
+Any change to the tool ships as a release. Not "when it feels significant" — a fix
+that is only on `main` reaches nobody. Editors auto-update the extension, but only
+for people who installed it from a registry, and only once the release is actually
+*in* that registry: v1.0.7 reached GitHub, no registry, and therefore no editor.
+Every time work lands on `src/`, `examples/`, the config example, or the docs:
 
 1. **Bump `version` in `package.json`.** Patch for a fix or a doc change, minor
    for a new setting or command, major for a breaking config change.
@@ -26,8 +27,22 @@ config example, or the docs:
    git tag v<version> && git push origin main && git push origin v<version>
    ```
    `.github/workflows/release.yml` rebuilds the `.vsix` from the tag, refuses to
-   publish if the tag disagrees with `package.json`, and attaches the artifact
-   plus `SHA256SUMS.txt` to a GitHub release.
+   publish if the tag disagrees with `package.json`, attaches the artifact plus
+   `SHA256SUMS.txt` to a GitHub release, and publishes to **Open VSX** — which is
+   where Cursor, VSCodium and Windsurf take their updates from. Open VSX indexes
+   asynchronously, so a new version can 404 for a few minutes after a green run;
+   confirm with `npx ovsx get SergeyOhanyan.agent-loop --metadata`.
+6. **Upload the `.vsix` to the VS Code Marketplace by hand**, at
+   <https://marketplace.visualstudio.com/manage>. This step is deliberately not
+   automated and it is the one that gets forgotten — skip it and VS Code users
+   silently stay on the previous version while Cursor users move on.
+
+   Automating it needs an Azure DevOps *global* PAT, which Microsoft retires on
+   **2026-12-01**. The sanctioned replacement (Entra ID workload identity +
+   `vsce publish --azure-credential`) requires a user-assigned managed identity,
+   which requires an Azure subscription, and the service-principal variant is
+   reported to fail against a *personally-owned* publisher — which this one is.
+   Decision: stay manual, and revisit in **November 2026**, before the deadline.
 
 The local `.vsix` is gitignored on purpose — the downloadable artifact is built
 from the tag by CI so it can never drift from the source.

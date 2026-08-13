@@ -67,7 +67,9 @@ Read this repository and propose values. Do not write anything yet — show me t
 list and let me correct it.
 
 - **Base branch** — check what the repo actually uses (`git symbolic-ref refs/remotes/origin/HEAD`,
-  or the branch list). Do not assume `main`.
+  or the branch list). Do not assume `main`. Task branches fork from it, and reviews diff from the
+  merge base with it — so it being an active branch that others push to is fine: commits landing on
+  it mid-task never enter an open task's review diff.
 - **Test command** — derive it from what is actually here: `package.json` scripts,
   `Makefile`, `pyproject.toml`, `Cargo.toml`, `composer.json`, a CI workflow in
   `.github/workflows/`. Prefer the one CI runs. This becomes `AGENT_LOOP_VERIFY`,

@@ -263,6 +263,10 @@ accumulates correctly, and review only ever diffs each task's own increment (not
 inherited history). If a task has zero or more-than-one blockers, it forks from the configured base
 branch (`AGENT_LOOP_BASE`, default `main`) instead.
 
+That increment is measured from the **merge base** with whichever branch it forked from, not from
+that branch's current tip. Predecessor commits, and anything that lands on the base while this task
+is open, therefore stay out of its review diff even when the fork point is hours old.
+
 **Practical upshot:** a genuinely sequential pipeline (A → B → C → D) should give each task **exactly
 one** blocker — its immediate predecessor — not "all prior tasks in the chain." Give a task multiple
 blockers only when it truly needs several independent pieces of work to land first and doesn't care

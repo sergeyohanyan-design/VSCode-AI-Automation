@@ -1,4 +1,5 @@
-# Builds the .vsix from the tagged commit and publishes it as a release asset.
+# Builds the .vsix from the tagged commit, publishes it as a release asset, and pushes it to
+# Open VSX so installed copies auto-update.
 #
 # The point is that the downloadable artifact can never drift from the source: it is built here, from
 # the tag, rather than uploaded by hand from someone's laptop. Push a tag, get a release.
@@ -86,4 +87,36 @@ jobs:
 
             or in VS Code: Extensions → `…` → *Install from VSIX…*
 
-            A `.vsix` install does not auto-update. Verify the download against `SHA256SUMS.txt`.
+            A hand-installed `.vsix` does not auto-update. Installing from your editor's
+            marketplace does — `code --install-extension SergeyOhanyan.agent-loop`, or
+            `cursor --install-extension SergeyOhanyan.agent-loop` for Cursor/VSCodium/Windsurf.
+
+            Verify the download against `SHA256SUMS.txt`.
+
+      # Registry publishing. An editor only auto-updates extensions it installed from a registry, so
+      # a release that stops at the GitHub asset reaches nobody who is already running Agent Loop —
+      # v1.0.7 shipped to GitHub, never to a registry, and landed in no editor. Automating it here is
+      # the same rule the .vsix already follows: built from the tag, so it cannot drift.
+      #
+      # Runs AFTER the release above on purpose. If a token has expired, the release and its asset
+      # are already published and this step fails loudly — the reverse order would lose both.
+      #
+      # Prerelease tags are excluded: a -rc tag exercises everything above this line without being
+      # pushed to real users as an update.
+      #
+      # Open VSX only, for now. The VS Code Marketplace needs an Azure DevOps *global* PAT, which
+      # Microsoft fully retires on 2026-12-01, so it is published by hand from
+      # https://marketplace.visualstudio.com/manage. Before December, move it here using Entra ID
+      # with GitHub OIDC — `vsce publish --azure-credential` — which needs no stored secret.
+      - name: Publish to Open VSX
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          # A missing secret expands to an empty string and fails several steps later as an opaque
+          # auth error. Say what is actually wrong instead.
+          if [ -z "$OVSX_PAT" ]; then
+            echo "::error::OVSX_PAT is not set — add it under Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+          npx --yes ovsx publish "agent-loop-${{ steps.version.outputs.version }}.vsix" -p "$OVSX_PAT"

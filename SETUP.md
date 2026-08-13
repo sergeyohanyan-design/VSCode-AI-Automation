@@ -40,8 +40,21 @@ One agent is enough to start and see the thing work. Two are enough to land code
 
 ## 1. Install the extension
 
-**From a `.vsix`** (the normal path today). Download it from the
-[latest release](https://github.com/sergeyohanyan-design/VSCode-AI-Automation/releases/latest), then:
+**From your editor's marketplace** (the normal path — it auto-updates from here on).
+Search **Agent Loop** in the Extensions panel, or:
+
+```
+code --install-extension SergeyOhanyan.agent-loop      # VS Code
+cursor --install-extension SergeyOhanyan.agent-loop    # Cursor, VSCodium, Windsurf
+```
+
+Cursor and the other non-Microsoft builds cannot use the VS Code Marketplace; they take the same
+extension from [Open VSX](https://open-vsx.org/extension/SergeyOhanyan/agent-loop), which is why the
+command differs but the identifier does not.
+
+**From a `.vsix`**, for an air-gapped machine or to pin a version. Download it from the
+[latest release](https://github.com/sergeyohanyan-design/VSCode-AI-Automation/releases/latest),
+check it against `SHA256SUMS.txt`, then:
 
 ```
 code --install-extension agent-loop-<version>.vsix
@@ -49,7 +62,8 @@ code --install-extension agent-loop-<version>.vsix
 
 Or in VS Code: Extensions → `…` menu → *Install from VSIX…*
 
-Note that a `.vsix` install never auto-updates — to take a new version you download and install again.
+Note that a hand-installed `.vsix` never auto-updates — to take a new version you download and
+install again. That is the only reason to prefer the marketplace path.
 
 **From source**, if you cloned this repo. There are no dependencies to install:
 

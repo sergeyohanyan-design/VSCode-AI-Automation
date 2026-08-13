@@ -104,10 +104,17 @@ jobs:
       # Prerelease tags are excluded: a -rc tag exercises everything above this line without being
       # pushed to real users as an update.
       #
-      # Open VSX only, for now. The VS Code Marketplace needs an Azure DevOps *global* PAT, which
-      # Microsoft fully retires on 2026-12-01, so it is published by hand from
-      # https://marketplace.visualstudio.com/manage. Before December, move it here using Entra ID
-      # with GitHub OIDC — `vsce publish --azure-credential` — which needs no stored secret.
+      # Open VSX only, by decision — not by oversight. The VS Code Marketplace is uploaded by hand
+      # from https://marketplace.visualstudio.com/manage (see CLAUDE.md step 6), because every
+      # automated route is currently a dead end here:
+      #   - an Azure DevOps *global* PAT works today but Microsoft retires it on 2026-12-01;
+      #   - the sanctioned replacement (Entra ID workload identity + `vsce publish
+      #     --azure-credential`) wants a user-assigned managed identity, which needs an Azure
+      #     subscription this publisher's account does not have;
+      #   - the service-principal variant that would avoid the subscription is reported to fail
+      #     against a personally-owned publisher — microsoft/vscode-vsce#1023 — which this is.
+      # Revisit in November 2026, before the deadline. Do not "fix" this by adding a PAT step
+      # without reading the above first.
       - name: Publish to Open VSX
         if: ${{ !contains(github.ref_name, '-') }}
         env:

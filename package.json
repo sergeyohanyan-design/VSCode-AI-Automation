@@ -2,7 +2,7 @@
   "name": "agent-loop",
   "displayName": "Agent Loop",
   "description": "One button for a self-routing AI dev loop on a ClickUp board — senses which of Claude/Codex/Grok are available each pass and routes coding, review and landing accordingly.",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "publisher": "SergeyOhanyan",
   "license": "SEE LICENSE IN LICENSE.md",
   "icon": "images/icon.png",

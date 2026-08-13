@@ -54,6 +54,10 @@ Beyond the routing, the parts that matter in practice:
 - **Safe Stop.** Click the button while it runs and it finishes the round it is in, never
   interrupting an agent mid-task, writes a handover report, and exits with the tree and board
   consistent.
+- **Reviewers only ever see the task's own work.** The review diff is taken from the merge base
+  with the base branch, never from its moving tip. A hotfix landing on `main` while a task is open
+  is not part of that task's diff, so no reviewer can fail a task for "reverting" work it never
+  touched — and no round is burned on an implementer refusing to fix a change it never made.
 - **Dependency chaining.** A task whose completed blockers left exactly one unmerged branch forks
   from that branch, so sequential work accumulates and reviewers still see only each task's own
   increment. Landing pushes each task branch and never merges to `main`, so when two finished

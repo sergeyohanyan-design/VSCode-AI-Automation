@@ -244,6 +244,14 @@ contains `TRACKER ONLY`.
 **Work gets approved but never lands.**
 Landing is Claude's job. Check `claude` is on `PATH` and not rate-limited.
 
+**Review fails a task over files it never touched.**
+If the objection names unrelated files — "reverted this", "deleted that test" —
+and the coder then reports it changed nothing, check your version. Before
+**v1.0.6** the review diff was taken against the base branch's current tip, so
+anything merged into `main` while the task was open showed up as a deletion by
+the task. Upgrade: the `.vsix` does not auto-update, so an old install keeps
+doing this. The task is fine; do not rewrite it.
+
 **Tasks bounce between review and changes-requested forever.**
 Read the review comments. The same objection re-raised 5 rounds running means
 the task is mis-scoped, not that the agent is failing —

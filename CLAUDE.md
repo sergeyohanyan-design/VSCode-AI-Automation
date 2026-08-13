@@ -32,6 +32,29 @@ config example, or the docs:
 The local `.vsix` is gitignored on purpose — the downloadable artifact is built
 from the tag by CI so it can never drift from the source.
 
+## Never touch another project — no exceptions
+
+This repository is a tool that *operates on other repositories and a live ClickUp
+board*. Working **on** it must never mean running it **against** anything real.
+
+- **Never `import()` or plain-`node` `src/agent-loop.mjs`.** It self-executes: a
+  "does the module load?" check starts a real pass, probes the agents, and writes
+  task statuses and comments to the live board. This has already happened once —
+  a task in `in review` was flipped to `blocked` with a misleading PM comment,
+  because the run's `REPO` was this checkout while the task's branch lived in a
+  different repository. To check the file after an edit:
+  `node --check src/agent-loop.mjs` parses without executing, and `npm test` is
+  the sandboxed entry point.
+- **Never edit, branch, reset or otherwise touch another project's files**, and
+  never act on its ClickUp tasks, comments or statuses. Not to reproduce a bug,
+  not to verify a fix, not "read-only, just this once".
+- **Build testing infrastructure here instead.** `test/selftest.js` makes no
+  network calls and `--selftest` simulates ClickUp, so a new behaviour gets a new
+  case in that harness — not a trial run against real data.
+- **If something genuinely needs a live board**, create a dedicated throwaway
+  ClickUp list for this project and point the config at it. The real board is
+  never the test fixture.
+
 ## Redistribution — this repo ships to strangers
 
 Nothing project-specific, machine-specific or personal may enter a shipped file:

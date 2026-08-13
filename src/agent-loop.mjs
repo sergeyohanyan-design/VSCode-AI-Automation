@@ -2177,24 +2177,6 @@ export function extractDescriptionFix(out) {
 }
 
 // ---------- agent invocation ----------
-// Returns { v: verdict-object|null, unavailable }. Never edits (the diff is in the prompt).
-async function reviewerRun(who, t, ac, diff, base) {
-  const prompt = reviewPrompt(who[0].toUpperCase() + who.slice(1), t, ac, diff, base);
-  let result;
-  const label = `${who} review ${t.id}`;
-  if (who === 'grok') { const pf = writePrompt(prompt); result = await runProc(CMD.grok(pf, 8), { timeout: REVIEW_TIMEOUT_MS, label }); }
-  else if (who === 'codex') result = await runProc(CMD.codex(), { input: prompt, timeout: REVIEW_TIMEOUT_MS, label });
-  else result = await runProc(CMD.claude(), { input: prompt, timeout: REVIEW_TIMEOUT_MS, label });
-  if (result.killFailed) {
-    throw new FatalLoopError(`${who} review timed out and its process tree could not be confirmed stopped; refusing reviewer cleanup`, {
-      preserveCoding: true, unsafeChild: true,
-    });
-  }
-  const out = result.out;
-  const v = extractVerdict(out);
-  return { v, unavailable: !v && LIMIT_RE.test(out || '') };
-}
-
 // Cheap "is this agent up?" probe: run a trivial generation. Failure or a rate-limit signature = down.
 const PROBE_TXT = 'Reply with exactly: OK';
 

@@ -73,7 +73,12 @@ list and let me correct it.
 - **Test command** — derive it from what is actually here: `package.json` scripts,
   `Makefile`, `pyproject.toml`, `Cargo.toml`, `composer.json`, a CI workflow in
   `.github/workflows/`. Prefer the one CI runs. This becomes `AGENT_LOOP_VERIFY`,
-  the gate that must pass before reviewed work is allowed to land.
+  the gate that must pass before reviewed work is allowed to land. Keep any path
+  inside the repository relative (for example, `node tools/verify.mjs`) so it
+  resolves against the reviewed sandbox. The dispatcher refuses absolute paths
+  back into the primary repo; use `AGENT_LOOP_VERIFY_ALLOW_PRIMARY=1` only when
+  running the primary copy is explicitly intended. Absolute paths outside the
+  repo remain valid without the override.
 - **Gitignored dependency directories** the test command needs — `node_modules`,
   `vendor`, a checked-in-nowhere test database, and so on. Verification runs in a
   fresh checkout, which has none of them, so anything missing here makes every

@@ -196,6 +196,12 @@ tests agree".
 AGENT_LOOP_VERIFY=npm test
 ```
 
+Keep paths in this command repo-relative, for example `node tools/verify.mjs`. The
+dispatcher runs it with the sandbox as its working directory and refuses an
+absolute path back into the primary repo, because that would test the wrong
+checkout. Only set `AGENT_LOOP_VERIFY_ALLOW_PRIMARY=1` when running that primary
+copy is deliberate; absolute verifier paths outside the repo remain allowed.
+
 **`AGENT_LOOP_VERIFY_SEED_DIRS`** — if your test command needs gitignored
 dependency directories. A fresh checkout has no `node_modules/` or `vendor/`, so
 without this, verification fails on every run with a missing-dependency error

@@ -152,7 +152,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { writeFileSync, mkdtempSync, appendFileSync, existsSync, readFileSync, unlinkSync, rmSync, renameSync, statSync, utimesSync, cpSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join, resolve as pathResolve, sep as pathSep, normalize as pathNormalize } from 'node:path';
+import { join, resolve as pathResolve, sep as pathSep, normalize as pathNormalize, win32 as pathWin32, posix as pathPosix } from 'node:path';
 
 // ---------- args ----------
 const argv = process.argv.slice(2);
@@ -185,6 +185,7 @@ const LIST_ID = process.env.AGENT_LOOP_LIST_ID;
 const REPO    = process.env.AGENT_LOOP_REPO || process.cwd();
 const BASE    = process.env.AGENT_LOOP_BASE || 'main';
 const VERIFY  = process.env.AGENT_LOOP_VERIFY || '';
+const VERIFY_ALLOW_PRIMARY = process.env.AGENT_LOOP_VERIFY_ALLOW_PRIMARY === '1';
 // VERIFY runs in a throwaway `git clone` (openDetachedWorktree), which — like any git clone — never
 // contains gitignored dependency dirs (vendor/, node_modules/). Without this, a VERIFY that needs
 // installed packages fails on EVERY run with a missing-autoloader/missing-module error that has
@@ -593,6 +594,72 @@ async function selftest() {
   const q = forVerify.OPENAI_API_KEY === undefined && forVerify.ANTHROPIC_API_KEY === undefined && forVerify.GITHUB_TOKEN === undefined
     && forAgent.OPENAI_API_KEY === 'sk-a' && forAgent.ANTHROPIC_API_KEY === 'sk-b';
   if (!q) console.log('  stripProviderKeys probe: failed', { forVerify, forAgent });
+
+  // VERIFY is a shell command rather than a child-env value, so it needs its own regression probes:
+  // an absolute primary-tree harness silently judges the wrong checkout, while relative and external
+  // commands must remain valid because they resolve against the verify sandbox at execution time.
+  const verifyPrimary = process.platform === 'win32' ? 'D:\\repo\\primary' : '/repo/primary';
+  const verifyInside = process.platform === 'win32'
+    ? 'D:\\repo\\primary\\tools\\verify.mjs'
+    : '/repo/primary/tools/verify.mjs';
+  const verifyInsideForward = verifyInside.replaceAll('\\', '/');
+  const verifyInsideSingleQuoted = verifyCommandPrimaryPathError(`node '${verifyInside}'`, verifyPrimary);
+  const verifyInsideDoubleQuoted = verifyCommandPrimaryPathError(`node "${verifyInside}"`, verifyPrimary);
+  const verifySibling = process.platform === 'win32'
+    ? 'D:\\repo\\primary-other\\tools\\verify.mjs'
+    : '/repo/primary-other/tools/verify.mjs';
+  const verifyOutside = process.platform === 'win32'
+    ? 'D:\\shared\\verify.mjs'
+    : '/shared/verify.mjs';
+  const verifyWindowsForms = process.platform !== 'win32'
+    || (!!verifyCommandPrimaryPathError(`node "${verifyInsideForward}"`, verifyPrimary)
+      && !!verifyCommandPrimaryPathError(`node "${verifyInside}"`, verifyPrimary)
+      && !!verifyCommandPrimaryPathError(`node "${verifyInside.toUpperCase()}"`, verifyPrimary));
+  const verifyGuardConfigDir = mkdtempSync(join(tmpdir(), 'al-selftest-verify-guard-'));
+  const verifyGuardConfig = join(verifyGuardConfigDir, 'empty.env');
+  writeFileSync(verifyGuardConfig, '');
+  const startupGuardRejects = args => {
+    try {
+      execFileSync(process.execPath, [process.argv[1], ...args], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          AGENT_LOOP_ENV: verifyGuardConfig,
+          AGENT_LOOP_REPO: verifyPrimary,
+          AGENT_LOOP_VERIFY: `node "${verifyInside}"`,
+          AGENT_LOOP_VERIFY_ALLOW_PRIMARY: '',
+          CLICKUP_TOKEN: '',
+          AGENT_LOOP_LIST_ID: '',
+        },
+        encoding: 'utf8',
+        stdio: 'pipe',
+      });
+      return false;
+    } catch (error) {
+      const output = `${error.stdout || ''}${error.stderr || ''}`;
+      return error.status === 1
+        && output.includes('AGENT_LOOP_VERIFY contains an absolute path into the primary repo')
+        && output.includes(verifyInside)
+        && output.includes('use instead: node tools' + pathSep + 'verify.mjs');
+    }
+  };
+  const verifyStartupGuard = startupGuardRejects([]) && startupGuardRejects(['--check']);
+  try { rmSync(verifyGuardConfigDir, { recursive: true, force: true }); } catch {}
+  const verifyPathGuard = !!verifyInsideDoubleQuoted
+    && verifyInsideDoubleQuoted.includes(verifyInside)
+    && verifyInsideDoubleQuoted.includes('node tools' + pathSep + 'verify.mjs')
+    && !!verifyInsideSingleQuoted
+    && verifyWindowsForms
+    && verifyCommandPrimaryPathError(`node "${verifySibling}"`, verifyPrimary) === null
+    && verifyCommandPrimaryPathError(`node "${verifyOutside}"`, verifyPrimary) === null
+    && verifyCommandPrimaryPathError('node tools/verify.mjs', verifyPrimary) === null
+    && verifyCommandPrimaryPathError('', verifyPrimary) === null
+    && verifyCommandPrimaryPathError(`node "${verifyInside}"`, verifyPrimary, true) === null
+    && verifyCommandPrimaryPathError('node --test', verifyPrimary) === null
+    && verifyStartupGuard;
+  if (!verifyPathGuard) console.log('  verify primary-path guard probe: failed', {
+    verifyInsideDoubleQuoted, verifyInsideSingleQuoted, verifyWindowsForms, verifyStartupGuard,
+  });
 
   // findBranchCheckoutIn must locate a branch checked out in the PRIMARY worktree (always the
   // listing's first block) or any linked worktree, and must not false-positive on a different one.
@@ -1041,11 +1108,21 @@ async function selftest() {
 
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
     && cuRetryClass && quotaReset && attribution
-    && c && d && e && implementCap && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && branchCheckoutOk && s && t && u && w
+    && c && d && e && implementCap && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w
     && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && chainBaseSelection && parkedReviewRouting && rollup
     && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication;
-  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution})`);
+  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution})`);
   process.exit(good ? 0 : 1);
+}
+
+// Refuse before credential/board checks so both a normal dispatcher run and --check diagnose the
+// sandbox escape immediately, without touching ClickUp or waiting for a task to reach verification.
+if (!opts.selftest) {
+  const verifyPathError = verifyCommandPrimaryPathError(VERIFY, REPO, VERIFY_ALLOW_PRIMARY);
+  if (verifyPathError) {
+    console.error(verifyPathError);
+    process.exit(1);
+  }
 }
 
 if (!TOKEN && !opts.selftest) { console.error('No CLICKUP_TOKEN. Put it in ~/.agent-loop.env  →  CLICKUP_TOKEN=pk_...'); process.exit(1); }   // --selftest is offline
@@ -1619,6 +1696,80 @@ async function killTree(pid) {   // function decl: lock-loss handling references
 // the blast radius of a compromised or malicious test (e.g. one that tries to exfiltrate a key) without
 // touching the coder/reviewer, which still need these keys.
 // True OS filesystem jails are not available here; this is defense-in-depth, not a seccomp sandbox.
+function windowsAbsolutePath(value) {
+  return typeof value === 'string' && (/^[a-z]:[\\/]/i.test(value) || /^\\\\[^\\]/.test(value));
+}
+
+function pathToolsFor(value, primaryRepo) {
+  return process.platform === 'win32' || (windowsAbsolutePath(value) && windowsAbsolutePath(primaryRepo))
+    ? pathWin32
+    : pathPosix;
+}
+
+export function isPrimaryPath(val, primaryRepo) {
+  if (typeof val !== 'string' || !val || typeof primaryRepo !== 'string' || !primaryRepo) return false;
+  try {
+    const paths = pathToolsFor(val, primaryRepo);
+    const primary = paths.normalize(paths.resolve(primaryRepo));
+    const candidate = paths.normalize(paths.resolve(val));
+    // Keep agentChildEnv's conservative comparison behavior while guaranteeing Windows drive/path
+    // case never lets a primary-tree pointer slip through.
+    const primaryCmp = primary.toLowerCase();
+    const candidateCmp = candidate.toLowerCase();
+    return candidateCmp === primaryCmp
+      || candidateCmp.startsWith(primaryCmp + paths.sep)
+      || candidateCmp.startsWith(primaryCmp + '/');
+  } catch {
+    return false;
+  }
+}
+
+function commandTokens(command) {
+  if (typeof command !== 'string' || !command) return [];
+  const tokens = [];
+  let i = 0;
+  while (i < command.length) {
+    while (i < command.length && /\s/.test(command[i])) i++;
+    if (i >= command.length) break;
+    const start = i;
+    const quote = command[i] === '"' || command[i] === "'" ? command[i++] : null;
+    const valueStart = i;
+    if (quote) {
+      while (i < command.length && command[i] !== quote) i++;
+    } else {
+      while (i < command.length && !/\s/.test(command[i])) i++;
+    }
+    const value = command.slice(valueStart, i);
+    if (quote && command[i] === quote) i++;
+    tokens.push({ value, start, end: i });
+  }
+  return tokens;
+}
+
+export function verifyCommandPrimaryPathError(command, primaryRepo, allowPrimary = false) {
+  if (typeof command !== 'string' || !command || allowPrimary) return null;
+  try {
+    const offending = commandTokens(command).find(({ value }) =>
+      (pathWin32.isAbsolute(value) || pathPosix.isAbsolute(value)) && isPrimaryPath(value, primaryRepo));
+    if (!offending) return null;
+    const paths = pathToolsFor(offending.value, primaryRepo);
+    let relative = paths.relative(paths.resolve(primaryRepo), paths.resolve(offending.value)) || '.';
+    if (offending.value.includes('/') && !offending.value.includes('\\')) relative = relative.replaceAll('\\', '/');
+    const replacement = /\s/.test(relative) ? `"${relative}"` : relative;
+    const suggested = command.slice(0, offending.start) + replacement + command.slice(offending.end);
+    return [
+      '✖ AGENT_LOOP_VERIFY contains an absolute path into the primary repo.',
+      '  That can run the primary tree\'s verifier instead of the reviewed sandbox and produce a wrong verdict.',
+      `  offending token: ${offending.value}`,
+      `  configured: ${command}`,
+      `  use instead: ${suggested}`,
+      '  If running the primary-tree copy is intentional, set AGENT_LOOP_VERIFY_ALLOW_PRIMARY=1.',
+    ].join('\n');
+  } catch {
+    return null;
+  }
+}
+
 export function agentChildEnv(base = process.env, { sandboxDir = null, primaryRepo = null, stripProviderKeys = false } = {}) {
   const env = { ...base };
   for (const key of Object.keys(env)) {
@@ -1640,7 +1791,6 @@ export function agentChildEnv(base = process.env, { sandboxDir = null, primaryRe
   env.GIT_ASKPASS = process.platform === 'win32' ? 'cmd.exe /c exit 1' : '/bin/false';
   env.SSH_ASKPASS = env.GIT_ASKPASS;
 
-  const primary = primaryRepo ? pathNormalize(pathResolve(primaryRepo)) : null;
   const sandbox = sandboxDir ? pathNormalize(pathResolve(sandboxDir)) : null;
   // Point repo-oriented vars at the sandbox only — never at the primary tree.
   if (sandbox) {
@@ -1650,18 +1800,10 @@ export function agentChildEnv(base = process.env, { sandboxDir = null, primaryRe
   } else {
     delete env.AGENT_LOOP_REPO;
   }
-  if (primary) {
-    const primaryLower = primary.toLowerCase();
-    const isPrimaryPath = (val) => {
-      if (typeof val !== 'string' || !val) return false;
-      let n;
-      try { n = pathNormalize(pathResolve(val)); } catch { return false; }
-      const nl = n.toLowerCase();
-      return nl === primaryLower || nl.startsWith(primaryLower + pathSep) || nl.startsWith(primaryLower + '/');
-    };
+  if (primaryRepo) {
     for (const key of Object.keys(env)) {
       if (key === 'PATH' || key === 'Path' || key === 'PATHEXT') continue; // never mangle PATH
-      if (isPrimaryPath(env[key])) {
+      if (isPrimaryPath(env[key], primaryRepo)) {
         if (sandbox) env[key] = sandbox;
         else delete env[key];
       }

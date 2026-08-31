@@ -44,7 +44,9 @@ Beyond the routing, the parts that matter in practice:
   suite is green" are different claims, and this one requires both. Nothing here pins a database or
   a service: whatever the verify process exports would override the non-forced env declarations in
   your test config, so a hardcoded engine would silently test a stack production does not run. Point
-  `AGENT_LOOP_VERIFY_ENV_FILE` at the same environment file CI uses instead.
+  `AGENT_LOOP_VERIFY_ENV_FILE` at the same environment file CI uses instead. Keep
+  `AGENT_LOOP_VERIFY` repo-relative (for example, `node tools/verify.mjs`) so the sandbox runs the
+  reviewed copy; an absolute path back into the primary repo is refused at startup.
 - **Isolation.** Every agent call runs in a throwaway `git clone` under the temp directory, with no
   remotes and no credential helper. The dispatcher is the only thing that touches your real repo.
   It snapshots `git status` before and after every call and stops hard if anything moved.
@@ -146,7 +148,7 @@ what you don't need — two keys are required, everything else has a working def
 |---|---|
 | **Required** | `CLICKUP_TOKEN`, `AGENT_LOOP_LIST_ID` |
 | **Your project** | base branch, repo path, project prompt contract |
-| **Verification** | test command, sandbox location, dependency dirs to seed, test env file |
+| **Verification** | repo-relative test command, sandbox location, dependency dirs to seed, test env file, deliberate primary-path opt-out |
 | **Board vocabulary** | all 8 status names, both custom field names, the never-pick-up column |
 | **Agent commands** | the full CLI invocation for each agent — change model, flags, or binary |
 | **Timing** | poll interval, churn cap, per-stage timeouts, retry policy |

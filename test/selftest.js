@@ -227,7 +227,7 @@ assert.equal(png.subarray(1, 4).toString('ascii'), 'PNG', 'the icon must be a re
 const [iw, ih] = [png.readUInt32BE(16), png.readUInt32BE(20)];
 assert.equal(iw, ih, `icon must be square, got ${iw}x${ih}`);
 assert.ok(iw >= 128, `icon must be at least 128px, got ${iw}px`);
-for (const cmd of ['agentLoop.toggle', 'agentLoop.setup', 'agentLoop.checkBoard', 'agentLoop.openConfig', 'agentLoop.safeStop', 'agentLoop.forceStop', 'agentLoop.openStopReport']) {
+for (const cmd of ['agentLoop.toggle', 'agentLoop.setup', 'agentLoop.checkBoard', 'agentLoop.openConfig', 'agentLoop.safeStop', 'agentLoop.forceStop', 'agentLoop.openStopReport', 'agentLoop.recover']) {
   assert.ok(pkg.contributes.commands.some(c => c.command === cmd), `package.json does not contribute ${cmd}`);
 }
 

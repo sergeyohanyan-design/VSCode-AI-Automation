@@ -109,10 +109,16 @@ const selected = files === null
   : SUITES.filter(s => files.some(f => s.when.test(f)));
 
 if (!selected.length) {
+  console.log('AGENT_LOOP_VERIFY_SCOPE: none');
   console.log('verify: nothing in this diff maps to a suite — nothing to prove, passing');
   process.exit(0);
 }
 
+if (files === null) {
+  console.log('AGENT_LOOP_VERIFY_SCOPE: full');
+} else {
+  console.log(`AGENT_LOOP_VERIFY_SCOPE: scoped suites=${selected.map(s => s.name).join(',')} files=${files.length}`);
+}
 console.log(`verify: running ${selected.map(s => s.name).join(', ')}`);
 
 if (existsSync('package.json') && !existsSync('node_modules')) {

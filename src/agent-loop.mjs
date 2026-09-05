@@ -116,16 +116,20 @@
  *   of the reviewed SHA each time, not a fresh clone, so gitignored dirs seeded once (see next) survive
  *   forever untouched. AGENT_LOOP_VERIFY_SEED_DIRS (comma-separated repo-relative dep dirs, e.g.
  *   vendor/node_modules/a sqlite db file) are copied from the primary repo into that sandbox ONCE, on
- *   first creation — without this VERIFY fails every time on a missing-dependency error unrelated to
- *   the diff, since a git clone/checkout never materializes gitignored files (default empty=none),
+ *   first creation, and the same list is junction/symlink-seeded into coder/reviewer clones from a
+ *   cache (never a writable link into the primary repo) — without this VERIFY and implement fail
+ *   on a missing-dependency error unrelated to the diff, since a git clone never materializes
+ *   gitignored files (default empty=none),
  *   AGENT_LOOP_CONTRACT_FILE (optional per-repo prompt
  *   addendum — e.g. a locale/i18n contract or required test pattern — appended to every
  *   implement/review prompt if present; default <repo>/tools/agent-loop.contract.md, silently
  *   omitted if missing — this script itself carries no project-specific instructions),
  *   AGENT_LOOP_POLL (watch interval s, default 60), AGENT_LOOP_MAX_ROUNDS (default 5),
  *   AGENT_LOOP_HEARTBEAT_S (terminal progress tick during long agent stages, default 30, 0=off),
- *   AGENT_LOOP_IMPLEMENT_TIMEOUT_S (default 1200) / _REVIEW_TIMEOUT_S (600) / _VERIFY_TIMEOUT_S
- *   (1500) — raise the verify cap for a slow full-suite gate,
+ *   AGENT_LOOP_IMPLEMENT_TIMEOUT_S (default 1200, absolute ceiling) /
+ *   AGENT_LOOP_IMPLEMENT_IDLE_S (default 480; 0 = wall-clock only) / _REVIEW_TIMEOUT_S (600) /
+ *   _VERIFY_TIMEOUT_S (1500) — raise the verify cap for a slow full-suite gate,
+ *   AGENT_LOOP_CI_WAIT_S (default 0 = do not poll forge checks after push),
  *   AGENT_LOOP_GIT_TIMEOUT_S (default 120), AGENT_LOOP_CLICKUP_TIMEOUT_S (default 30),
  *   AGENT_LOOP_LOG, AGENT_LOOP_LOCK, AGENT_LOOP_ROUNDS (durable churn tally), AGENT_LOOP_ENV,
  *   plus command overrides
@@ -150,17 +154,19 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { writeFileSync, mkdtempSync, appendFileSync, existsSync, readFileSync, unlinkSync, rmSync, renameSync, statSync, utimesSync, cpSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, appendFileSync, existsSync, readFileSync, unlinkSync, rmSync, renameSync, statSync, utimesSync, cpSync, watch, mkdirSync, symlinkSync, linkSync, readdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join, resolve as pathResolve, sep as pathSep, normalize as pathNormalize, win32 as pathWin32, posix as pathPosix } from 'node:path';
+import { join, resolve as pathResolve, sep as pathSep, normalize as pathNormalize, dirname, win32 as pathWin32, posix as pathPosix } from 'node:path';
 
 // ---------- args ----------
 const argv = process.argv.slice(2);
-const opts = { watch: false, selftest: false, check: false, taskId: null };
+const opts = { watch: false, selftest: false, check: false, recover: false, yes: false, taskId: null };
 for (const a of argv) {
   if (a === '--watch') opts.watch = true;
   else if (a === '--selftest') opts.selftest = true;
   else if (a === '--check') opts.check = true;
+  else if (a === '--recover') opts.recover = true;
+  else if (a === '--yes') opts.yes = true;
   else if (!a.startsWith('--')) opts.taskId = a;
 }
 
@@ -195,6 +201,7 @@ const VERIFY_ALLOW_PRIMARY = process.env.AGENT_LOOP_VERIFY_ALLOW_PRIMARY === '1'
 // reinstalling from scratch (measured: a cold `composer install` alone took ~6 minutes, most of
 // VERIFY's 10-minute cap). Default empty: no behavior change for a repo that doesn't need this.
 const VERIFY_SEED_DIRS = (process.env.AGENT_LOOP_VERIFY_SEED_DIRS || '').split(',').map(s => s.trim()).filter(Boolean);
+const SEED_CACHE_DIR = process.env.AGENT_LOOP_SEED_CACHE || join(homedir(), '.agent-loop-seed-cache');
 // Optional per-repo prompt addendum (e.g. a locale/i18n contract, a required test pattern) —
 // baked into every implement/review prompt if the file exists, otherwise silently omitted. Lets a
 // specific project shape agent behavior WITHOUT any project-specific text living in this script.
@@ -225,6 +232,7 @@ const heartbeatMs = () => num('AGENT_LOOP_HEARTBEAT_S', 30, 0, 86_400) * 1000;
 // No TTY here: git must fail fast instead of waiting on a credential prompt that nothing can answer.
 process.env.GIT_TERMINAL_PROMPT = '0';
 export const TIMEOUT_CODE = 124;   // conventional `timeout(1)` exit code; callers treat non-zero as failure
+export const TURNS_CODE = 125;     // agent hit its CLI --max-turns; distinct from a crash (exit 1) and a timeout (124)
 // Stage timeouts. The defaults below come from measurement, not guesswork, on a queue that ran
 // hundreds of real tasks — but the right value depends on YOUR suite, so each one is env-overridable.
 //
@@ -234,19 +242,26 @@ export const TIMEOUT_CODE = 124;   // conventional `timeout(1)` exit code; calle
 // that did finish took a median 9.3min / max 10.5min, only ~1.5min of slack under that cap. 20 buys
 // real headroom without hiding a lane that is genuinely stuck.
 export const IMPLEMENT_TIMEOUT_MS = num('AGENT_LOOP_IMPLEMENT_TIMEOUT_S', 20 * 60, 60, 6 * 3600) * 1000;
+// Idle-progress cap for implement only. 0 disables it (pure wall-clock, the 1.0.10 behaviour).
+// A round that writes or prints every 90s is working; a round silent for this long is stuck.
+export const IMPLEMENT_IDLE_MS = num('AGENT_LOOP_IMPLEMENT_IDLE_S', 8 * 60, 0, 6 * 3600) * 1000;
 // Review: diff-sized reads, median 2.4min, but a 6-minute wall was hit 7 times (one task twice in a
 // row, then passed in 3.1min on the third try). 10 covers that tail.
 export const REVIEW_TIMEOUT_MS = num('AGENT_LOOP_REVIEW_TIMEOUT_S', 10 * 60, 60, 6 * 3600) * 1000;
 // Verify: the deterministic, credential-stripped gate has to finish a dependency refresh plus the
 // full suite once. Raise this for a big mobile/monorepo suite; lower it for a fast unit-test command.
 export const VERIFY_TIMEOUT_MS = num('AGENT_LOOP_VERIFY_TIMEOUT_S', 25 * 60, 60, 6 * 3600) * 1000;
+export const MAX_TURNS = num('AGENT_LOOP_MAX_TURNS', 40, 1, 500);
+export const CI_WAIT_MS = num('AGENT_LOOP_CI_WAIT_S', 0, 0, 6 * 3600) * 1000;
+export const CI_POLL_MS = num('AGENT_LOOP_CI_POLL_S', 15, 5, 60) * 1000;
 const mmss = ms => `${Math.floor(ms / 60000)}m${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}s`;
 class FatalLoopError extends Error {
-  constructor(message, { preserveCoding = false, unsafeChild = false } = {}) {
+  constructor(message, { preserveCoding = false, unsafeChild = false, rescue = null } = {}) {
     super(message);
     this.name = 'FatalLoopError';
     this.preserveCoding = preserveCoding;
     this.unsafeChild = unsafeChild;
+    this.rescue = rescue || null;
   }
 }
 
@@ -308,9 +323,9 @@ const codexProbeCommand = () => process.env.AGENT_LOOP_CODEX_PROBE_CMD
   || process.env.AGENT_LOOP_CODEX_CMD
   || `codex exec --sandbox read-only --skip-git-repo-check`;
 const CMD = {
-  grok:            (pf, maxTurns = 40) => process.env.AGENT_LOOP_GROK_CMD?.replace('{pf}', pf)
+  grok:            (pf, maxTurns = MAX_TURNS) => process.env.AGENT_LOOP_GROK_CMD?.replace('{pf}', pf)
                         || `grok --prompt-file "${pf}" --always-approve --no-plan --max-turns ${maxTurns} --output-format plain`,
-  claudeImplement: ()  => process.env.AGENT_LOOP_CLAUDE_IMPLEMENT || `claude -p --model sonnet --permission-mode bypassPermissions --max-turns 40`,
+  claudeImplement: ()  => process.env.AGENT_LOOP_CLAUDE_IMPLEMENT || `claude -p --model sonnet --permission-mode bypassPermissions --max-turns ${MAX_TURNS}`,
   claude:          ()  => process.env.AGENT_LOOP_CLAUDE_CMD || `claude -p --model sonnet`,
   // Opus is reserved for the one hard call in this pipeline: diagnosing a task that has
   // churned MAX_ROUNDS times without converging (split vs. AC-fix). Every other Claude call
@@ -384,6 +399,123 @@ async function selftest() {
   const e = slow.code === TIMEOUT_CODE && tookMs < 3000 && /TIMEOUT after/.test(slow.out) && !orphanActed;
   if (!e) console.log(`  timeout probe: code=${slow.code} (want ${TIMEOUT_CODE}) took=${tookMs}ms (want <3000) orphanStillActed=${orphanActed} (want false)`);
 
+  const idleKeep = progressDeadline({ now: 10_000, startedAt: 0, lastProgressAt: 9_500, idleMs: 8_000, ceilingMs: 20_000 });
+  const idleSilent = progressDeadline({ now: 10_000, startedAt: 0, lastProgressAt: 1_000, idleMs: 8_000, ceilingMs: 20_000 });
+  const idleWallOnly = progressDeadline({ now: 10_000, startedAt: 0, lastProgressAt: 0, idleMs: 0, ceilingMs: 20_000 });
+  const idleCeiling = progressDeadline({ now: 20_000, startedAt: 0, lastProgressAt: 19_900, idleMs: 8_000, ceilingMs: 20_000 });
+  const idleDeadline = idleKeep.fire === false && idleSilent.fire === true && idleSilent.reason === 'idle'
+    && idleWallOnly.fire === false && idleCeiling.fire === true && idleCeiling.reason === 'ceiling';
+  if (!idleDeadline) console.log('  idle-progress deadline probe: failed', { idleKeep, idleSilent, idleWallOnly, idleCeiling });
+
+  const budgetOn = implementBudgetText({ wallMs: 1_200_000, idleMs: 480_000, remainingS: 1200 });
+  const budgetOff = implementBudgetText({ wallMs: 1_200_000, idleMs: 0, remainingS: 1200 });
+  const budgetProbe = budgetOn.includes('1200') && /Implement FIRST/i.test(budgetOn)
+    && !/also stopped after/i.test(budgetOff) && !/no output and no file writes/i.test(budgetOff);
+  if (!budgetProbe) console.log('  implement budget prompt probe: failed', { budgetOn, budgetOff });
+
+  const phaseLine = formatImplementPhase({ firstWriteMs: 400_000, lastWriteMs: 905_000, wallMs: 1_200_000, killReason: 'ceiling' });
+  const phaseProbe = /first-write 6m40s/.test(phaseLine) && /last-write 15m05s/.test(phaseLine)
+    && /post-write 4m55s/.test(phaseLine) && /killed-ceiling/.test(phaseLine);
+  if (!phaseProbe) console.log('  implement phase log probe: failed', { phaseLine });
+
+  const noisyIdle = await runProc(
+    'node -e "let i=0; const t=setInterval(()=>{console.log(i++); if(i>=8){clearInterval(t); process.exit(0);}},200)"',
+    { idleTimeout: 400, timeout: 5_000 },
+  );
+  const quietIdleStart = Date.now();
+  const quietIdle = await runProc(
+    'node -e "setTimeout(()=>{},5000)"',
+    { idleTimeout: 400, timeout: 5_000 },
+  );
+  const quietIdleMs = Date.now() - quietIdleStart;
+  const idleLive = noisyIdle.code === 0
+    && quietIdle.code === TIMEOUT_CODE && quietIdleMs < 1500 && /idle/i.test(quietIdle.out);
+  if (!idleLive) console.log(`  idle-progress live probe: noisy=${noisyIdle.code} quiet=${quietIdle.code} quietMs=${quietIdleMs} out=${(quietIdle.out || '').slice(-200)}`);
+
+  const linkedSeed = seedPlan({ rel: 'vendor', destExists: false, cacheExists: true, platform: 'win32', sameVolume: true });
+  const copiedSeed = seedPlan({ rel: 'vendor', destExists: false, cacheExists: false, platform: 'win32', sameVolume: false });
+  const skipSeed = seedPlan({ rel: 'vendor', destExists: true, cacheExists: true, platform: 'win32', sameVolume: true });
+  const seedPlanProbe = linkedSeed.action === 'junction' && linkedSeed.source === 'cache'
+    && copiedSeed.action === 'copy' && skipSeed.action === 'skip';
+  if (!seedPlanProbe) console.log('  seed-plan probe: failed', { linkedSeed, copiedSeed, skipSeed });
+
+  const seedRoot = mkdtempSync(join(tmpdir(), 'al-seed-'));
+  const seedPrimary = join(seedRoot, 'primary');
+  const seedCache = join(seedRoot, 'cache');
+  const seedSandbox = join(seedRoot, 'sandbox');
+  mkdirSync(join(seedPrimary, 'vendor'), { recursive: true });
+  mkdirSync(seedSandbox, { recursive: true });
+  writeFileSync(join(seedPrimary, 'vendor', 'pkg.txt'), 'from-primary');
+  seedSandboxDirs(seedSandbox, { primary: seedPrimary, dirs: ['vendor'], cacheDir: seedCache });
+  const seededDest = existsSync(join(seedSandbox, 'vendor', 'pkg.txt'));
+  writeFileSync(join(seedSandbox, 'vendor', 'pkg.txt'), 'from-sandbox');
+  const primaryUnchanged = readFileSync(join(seedPrimary, 'vendor', 'pkg.txt'), 'utf8') === 'from-primary';
+  const seedLive = seededDest && primaryUnchanged;
+  if (!seedLive) console.log('  coder-sandbox dependency seeding probe: failed', { seededDest, primaryUnchanged, dest: join(seedSandbox, 'vendor', 'pkg.txt') });
+  try { rmSync(seedRoot, { recursive: true, force: true }); } catch {}
+
+  const deadTree = resolveTreeKill({ rootAlive: false, liveDescendants: [], taskkillCode: 128, jobKilled: false });
+  const liveTree = resolveTreeKill({ rootAlive: false, liveDescendants: [4242], taskkillCode: 128, jobKilled: true });
+  const treeKillProbe = deadTree.ok === true && liveTree.ok === false;
+  if (!treeKillProbe) console.log('  confirmed-dead tree probe: failed', { deadTree, liveTree });
+
+  const refuseLive = recoverDecision({ livePids: [11], sandboxExists: true, newestMtimeMs: 1, stoppedAtMs: 100, sandboxDir: '/x' });
+  const refuseMissing = recoverDecision({ livePids: [], sandboxExists: false, newestMtimeMs: 0, stoppedAtMs: 100, sandboxDir: null });
+  const refuseStaleMarker = recoverDecision({ livePids: [], sandboxExists: true, newestMtimeMs: 1, stoppedAtMs: 100, sandboxDir: undefined });
+  const recoverGo = recoverDecision({ livePids: [], sandboxExists: true, newestMtimeMs: 100, stoppedAtMs: 110, sandboxDir: '/x' });
+  const recoverProbe = refuseLive.action === 'refuse' && /alive/.test(refuseLive.reason)
+    && refuseMissing.action === 'refuse' && refuseStaleMarker.action === 'refuse'
+    && recoverGo.action === 'proceed';
+  if (!recoverProbe) console.log('  recover-decision probe: failed', { refuseLive, refuseMissing, refuseStaleMarker, recoverGo });
+
+  const adjRetry = adjudicationRetryAction({ verdict: null, unavailable: false, attempt: 1 });
+  const adjRetain = adjudicationRetryAction({ verdict: null, unavailable: false, attempt: 2 });
+  const adjApply = adjudicationRetryAction({ verdict: { verdict: 'pass', blocking_issues: [] }, unavailable: false, attempt: 1 });
+  const adjProbe = adjRetry === 'retry' && adjRetain === 'retain' && adjApply === 'apply';
+  if (!adjProbe) console.log('  adjudication retry probe: failed', { adjRetry, adjRetain, adjApply });
+
+  const turnsProbe = isMaxTurnsOutput('max turns reached') && isMaxTurnsOutput('Reached the maximum turns')
+    && !isMaxTurnsOutput('turns out we need more tests')
+    && TURNS_CODE === 125 && TURNS_CODE !== TIMEOUT_CODE
+    && (process.env.AGENT_LOOP_MAX_TURNS ? true : MAX_TURNS === 40);
+  if (!turnsProbe) console.log('  max-turns probe: failed', { TURNS_CODE, MAX_TURNS });
+
+  const ciOff = ciWaitDecision({ waitMs: 0, hasToken: true, forge: 'github', checkCount: 3, failed: 1, pending: 0, elapsedMs: 0, noChecksGraceMs: 30_000 });
+  const ciNoCreds = ciWaitDecision({ waitMs: 600_000, hasToken: false, forge: 'github', checkCount: 0, failed: 0, pending: 0, elapsedMs: 0, noChecksGraceMs: 30_000 });
+  const ciNoChecks = ciWaitDecision({ waitMs: 600_000, hasToken: true, forge: 'github', checkCount: 0, failed: 0, pending: 0, elapsedMs: 30_000, noChecksGraceMs: 30_000 });
+  const ciRed = ciWaitDecision({ waitMs: 600_000, hasToken: true, forge: 'github', checkCount: 2, failed: 1, pending: 0, elapsedMs: 5_000, noChecksGraceMs: 30_000 });
+  const ciGreen = ciWaitDecision({ waitMs: 600_000, hasToken: true, forge: 'github', checkCount: 2, failed: 0, pending: 0, elapsedMs: 5_000, noChecksGraceMs: 30_000 });
+  const ciStill = ciWaitDecision({ waitMs: 600_000, hasToken: true, forge: 'github', checkCount: 2, failed: 0, pending: 1, elapsedMs: 5_000, noChecksGraceMs: 30_000 });
+  const ciTimed = ciWaitDecision({ waitMs: 600_000, hasToken: true, forge: 'github', checkCount: 2, failed: 0, pending: 1, elapsedMs: 600_000, noChecksGraceMs: 30_000 });
+  const ciProbe = ciOff === 'skip-disabled' && ciNoCreds === 'skip-no-credentials' && ciNoChecks === 'skip-no-checks'
+    && ciRed === 'fail' && ciGreen === 'pass' && ciStill === 'poll' && ciTimed === 'skip-timeout'
+    && CI_WAIT_MS === (process.env.AGENT_LOOP_CI_WAIT_S ? CI_WAIT_MS : 0);
+  if (!ciProbe) console.log('  ci-wait decision probe: failed', { ciOff, ciNoCreds, ciNoChecks, ciRed, ciGreen, ciStill, ciTimed, CI_WAIT_MS });
+
+  const landFail = landAfterPush({ ciDecision: 'fail' });
+  const landSkip = landAfterPush({ ciDecision: 'skip-no-credentials' });
+  const chainProbe = landFail.committed === false && landFail.status === S.changes
+    && landSkip.committed === true
+    && !dependencySatisfied({ status: { status: S.changes, type: 'custom' } })
+    && dependencySatisfied({ status: { status: S.committed, type: 'done' } });
+  if (!chainProbe) console.log('  ci-fail chain probe: failed', { landFail, landSkip });
+
+  const ghForge = forgeFromRemote('git@github.com:acme/app.git');
+  const glForge = forgeFromRemote('https://gitlab.com/acme/app.git');
+  const otherForge = forgeFromRemote('https://git.example/app.git');
+  const forgeProbe = ghForge.forge === 'github' && ghForge.owner === 'acme' && ghForge.repo === 'app'
+    && glForge.forge === 'gitlab' && otherForge.forge === null;
+  if (!forgeProbe) console.log('  forge-from-remote probe: failed', { ghForge, glForge, otherForge });
+
+  const scopedScope = parseVerifyScope('noise\nAGENT_LOOP_VERIFY_SCOPE: scoped suites=lint,unit files=4\n');
+  const fullScope = parseVerifyScope('AGENT_LOOP_VERIFY_SCOPE: full\n');
+  const missingScope = parseVerifyScope('verify: all selected suites green\n');
+  const scopeProbe = scopedScope.kind === 'scoped' && scopedScope.files === 4 && scopedScope.suites.includes('lint')
+    && fullScope.kind === 'full' && missingScope.kind === 'unstated'
+    && formatVerifyScopeLog('t1', scopedScope) !== formatVerifyScopeLog('t1', fullScope)
+    && formatVerifyScopeLog('t1', missingScope).includes('unstated');
+  if (!scopeProbe) console.log('  verify-scope probe: failed', { scopedScope, fullScope, missingScope });
+
   // The stage caps are env-configurable, so assert the PARSE, not a fixed number: with no override
   // set the documented default must come out, and with one set it must land inside the allowed
   // range. Asserting the literal here would fail every user who legitimately raised a cap.
@@ -392,6 +524,8 @@ async function selftest() {
     && (process.env[envName] ? true : ms === defaultS * 1000);
   const implementCap = capOk('AGENT_LOOP_IMPLEMENT_TIMEOUT_S', IMPLEMENT_TIMEOUT_MS, 20 * 60);
   if (!implementCap) console.log(`  implementation cap probe: ${IMPLEMENT_TIMEOUT_MS}ms out of range or not the 1200000ms default`);
+  const idleCap = (process.env.AGENT_LOOP_IMPLEMENT_IDLE_S ? IMPLEMENT_IDLE_MS >= 0 && IMPLEMENT_IDLE_MS <= 6 * 3600_000 : IMPLEMENT_IDLE_MS === 8 * 60 * 1000);
+  if (!idleCap) console.log(`  implementation idle cap probe: ${IMPLEMENT_IDLE_MS}ms out of range or not the 480000ms default`);
   const reviewCap = capOk('AGENT_LOOP_REVIEW_TIMEOUT_S', REVIEW_TIMEOUT_MS, 10 * 60);
   if (!reviewCap) console.log(`  review cap probe: ${REVIEW_TIMEOUT_MS}ms out of range or not the 600000ms default`);
   const verifyCap = capOk('AGENT_LOOP_VERIFY_TIMEOUT_S', VERIFY_TIMEOUT_MS, 25 * 60);
@@ -1108,10 +1242,11 @@ async function selftest() {
 
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
     && cuRetryClass && quotaReset && attribution
-    && c && d && e && implementCap && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w
+    && c && d && e && implementCap && idleCap && idleDeadline && idleLive && budgetProbe && phaseProbe && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w
     && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && chainBaseSelection && parkedReviewRouting && rollup
-    && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication;
-  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution})`);
+    && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication
+    && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe;
+  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution})`);
   process.exit(good ? 0 : 1);
 }
 
@@ -1132,6 +1267,7 @@ if (!LIST_ID && !opts.selftest) { console.error('No AGENT_LOOP_LIST_ID. Put it i
 const LOCK_FILE = process.env.AGENT_LOOP_LOCK || `${homedir()}/.agent-loop.lock`;
 // Written when a child may still be editing; blocks reclaim/start until a human clears it.
 const UNSAFE_FILE = process.env.AGENT_LOOP_UNSAFE || `${homedir()}/.agent-loop.unsafe`;
+const RESCUE_FILE = process.env.AGENT_LOOP_RESCUE || `${homedir()}/.agent-loop-rescue.json`;
 let allowLockRelease = true;   // false when a child may still be editing — do not free the lock
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 // A write failure here used to be swallowed (logged, then an UNCONDITIONAL "marker written"
@@ -1150,10 +1286,40 @@ async function writeWithRetry(fn, attempts = 3, delayMs = 150) {
   log(`  ⚠ write failed after ${attempts} attempt(s): ${lastErr?.message}`);
   return false;
 }
-async function markUnsafeChild(reason, { unsafeFile = UNSAFE_FILE, lockFile = LOCK_FILE } = {}) {
+function sandboxRescueSnapshot(dir) {
+  if (!dir || !existsSync(dir)) return {};
+  const files = { modified: [], untracked: [] };
+  let headSha = null;
+  try {
+    headSha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {}
+  try {
+    const po = execFileSync('git', ['-C', dir, 'status', '--porcelain'], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] });
+    for (const line of po.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const p = line.slice(3);
+      if (line.startsWith('??')) files.untracked.push(p);
+      else files.modified.push(p);
+    }
+  } catch {}
+  return { headSha, files };
+}
+
+async function markUnsafeChild(reason, { unsafeFile = UNSAFE_FILE, lockFile = LOCK_FILE, rescue = null } = {}) {
   allowLockRelease = false;
   const reasonText = String(reason || '').slice(0, 2000);
   const body = { at: new Date().toISOString(), reason: reasonText, pid: process.pid, children: [...ACTIVE_CHILDREN] };
+  if (rescue?.sandboxDir) {
+    const snap = sandboxRescueSnapshot(rescue.sandboxDir);
+    body.sandboxDir = rescue.sandboxDir;
+    if (rescue.branch) body.branch = rescue.branch;
+    if (rescue.taskId) body.taskId = rescue.taskId;
+    if (snap.headSha) body.headSha = snap.headSha;
+    if (snap.files) body.files = snap.files;
+  }
+  if (!opts.selftest) {
+    try { writeFileSync(RESCUE_FILE, JSON.stringify(body, null, 2)); } catch (e) { log(`  ⚠ could not write ${RESCUE_FILE}: ${e.message}`); }
+  }
   const fileOk = await writeWithRetry(() => writeFileSync(unsafeFile, JSON.stringify(body, null, 2)));
   const lockOk = await writeWithRetry(() => writeFileSync(lockFile, JSON.stringify({
     pid: LOCK_OWNER.pid, nonce: LOCK_OWNER.nonce, startedAt: LOCK_OWNER.startedAt,
@@ -1168,6 +1334,7 @@ async function markUnsafeChild(reason, { unsafeFile = UNSAFE_FILE, lockFile = LO
 }
 function clearUnsafeChildMarker() {
   try { unlinkSync(UNSAFE_FILE); } catch {}
+  try { unlinkSync(RESCUE_FILE); } catch {}
 }
 // Checks BOTH durability targets so a single failed write during markUnsafeChild cannot silently
 // drop the fence: the dedicated marker file, and the unsafe flag embedded in the current lock record.
@@ -1187,7 +1354,8 @@ function refuseIfUnsafeMarker() {
   console.error(`✖ refusing to start: an unsafe-child condition was recorded by a previous run.`);
   console.error(`  A previous run could not confirm agent subprocesses were dead. Inspect processes, then clear it.`);
   console.error(`  ${state.detail}`);
-  console.error(`  To clear: delete ${UNSAFE_FILE} if present, and remove ${LOCK_FILE} if its record carries "unsafe":true.`);
+  console.error(`  To recover preserved work: node src/agent-loop.mjs --recover`);
+  console.error(`  To clear by hand: delete ${UNSAFE_FILE} if present, and remove ${LOCK_FILE} if its record carries "unsafe":true.`);
   process.exit(1);
 }
 function makeLockOwner(pid = process.pid, nonce = randomUUID()) {
@@ -1598,6 +1766,118 @@ export const zeroChangeRoute = commitsBeyondBase => (commitsBeyondBase > 0 ? S.r
 // requested` from there, so the round budget is still enforced — one round per rejected review — and
 // a timeout that committed nothing is still an outright failure.
 export const timeoutRoute = (timedOut, committedPartial) => (timedOut && committedPartial ? S.review : S.changes);
+
+// Absolute ceiling wins when both would fire. idleMs === 0 never fires on silence.
+export function progressDeadline({ now, startedAt, lastProgressAt, idleMs, ceilingMs }) {
+  if (ceilingMs > 0 && now - startedAt >= ceilingMs) return { fire: true, reason: 'ceiling' };
+  if (idleMs > 0 && now - lastProgressAt >= idleMs) return { fire: true, reason: 'idle' };
+  return { fire: false };
+}
+
+export function implementBudgetText({ wallMs, idleMs, remainingS }) {
+  const remaining = Number.isFinite(remainingS) ? remainingS : Math.round((wallMs || 0) / 1000);
+  let text = `TIME BUDGET: wall-clock cap ${mmss(wallMs)}. Remaining at start: ${remaining}s.`;
+  if (idleMs > 0) {
+    text += ` Also stopped after ${mmss(idleMs)} with no output and no file writes.`;
+  }
+  text += ' Implement FIRST. Verify LAST. If a long test run will not finish inside the remaining budget, stop and leave the tree — the dispatcher will commit what you have. Do not start a verification you cannot finish.';
+  return text;
+}
+
+export function formatImplementPhase({ firstWriteMs, lastWriteMs, wallMs, killReason }) {
+  const fw = firstWriteMs == null ? 'never' : mmss(firstWriteMs);
+  const lw = lastWriteMs == null ? 'never' : mmss(lastWriteMs);
+  const post = lastWriteMs == null ? mmss(wallMs || 0) : mmss(Math.max(0, (wallMs || 0) - lastWriteMs));
+  let line = `first-write ${fw} last-write ${lw} post-write ${post} wall ${mmss(wallMs || 0)}`;
+  if (killReason === 'ceiling') line += ' killed-ceiling';
+  if (killReason === 'idle') line += ' killed-idle';
+  return line;
+}
+
+export function seedPlan({ destExists, cacheExists, platform, sameVolume, isDir = true }) {
+  if (destExists) return { action: 'skip' };
+  if (!cacheExists) return { action: 'copy', source: 'primary' };
+  if (platform === 'win32' && isDir && sameVolume) return { action: 'junction', source: 'cache' };
+  if (platform !== 'win32' && isDir) return { action: 'symlink', source: 'cache' };
+  if (!isDir) return { action: 'hardlink', source: 'cache' };
+  return { action: 'copy', source: 'cache' };
+}
+
+export function resolveTreeKill({ rootAlive, liveDescendants, taskkillCode, jobKilled }) {
+  const live = (liveDescendants || []).filter(Boolean);
+  if (live.length) return { ok: false, detail: `live descendants: ${live.join(',')}` };
+  if (!rootAlive) return { ok: true, detail: jobKilled ? 'job closed; no live descendants' : 'root gone; no live descendants' };
+  return { ok: false, detail: 'root still alive' };
+}
+
+export function recoverDecision({ livePids, sandboxExists, newestMtimeMs, stoppedAtMs, sandboxDir }) {
+  if ((livePids || []).length) return { action: 'refuse', reason: `descendant still alive: ${livePids.join(',')}` };
+  if (sandboxDir == null || sandboxDir === '') return { action: 'refuse', reason: 'marker has no sandbox path' };
+  if (!sandboxExists) return { action: 'refuse', reason: 'sandbox missing' };
+  if (Number.isFinite(newestMtimeMs) && Number.isFinite(stoppedAtMs) && newestMtimeMs > stoppedAtMs + 2000) {
+    return { action: 'refuse', reason: 'sandbox mutated after stop' };
+  }
+  return { action: 'proceed' };
+}
+
+export function isMaxTurnsOutput(out) {
+  return /max(?:imum)?[\s_-]*turns?\s+(?:reached|exceeded)|reached (?:the )?(?:configured )?max(?:imum)?[\s_-]*turns/i.test(out || '');
+}
+
+export function adjudicationRetryAction({ verdict, unavailable, attempt, maxAttempts = 2 }) {
+  if (unavailable) return 'retain';
+  if (verdict && ['pass', 'fail'].includes(verdict.verdict)) return 'apply';
+  if (attempt < maxAttempts) return 'retry';
+  return 'retain';
+}
+
+export function forgeFromRemote(url) {
+  const s = String(url || '').trim().replace(/\\/g, '/');
+  let m = s.match(/github\.com[:/]([^/]+)\/([^/.]+?)(?:\.git)?$/i);
+  if (m) return { forge: 'github', owner: m[1], repo: m[2] };
+  m = s.match(/gitlab\.com[:/](.+?)(?:\.git)?$/i);
+  if (m) {
+    const parts = m[1].replace(/^\/+/, '').split('/').filter(Boolean);
+    if (parts.length >= 2) return { forge: 'gitlab', owner: parts.slice(0, -1).join('/'), repo: parts.at(-1) };
+  }
+  return { forge: null };
+}
+
+export function ciWaitDecision({ waitMs, hasToken, forge, checkCount, failed, pending, elapsedMs, noChecksGraceMs = 30_000 }) {
+  if (!waitMs) return 'skip-disabled';
+  if (!hasToken) return 'skip-no-credentials';
+  if (!forge) return 'skip-unknown-forge';
+  if ((failed || 0) > 0) return 'fail';
+  if ((checkCount || 0) > 0 && (pending || 0) === 0) return 'pass';
+  if ((checkCount || 0) === 0 && elapsedMs >= (noChecksGraceMs || 30_000)) return 'skip-no-checks';
+  if (elapsedMs >= waitMs) return 'skip-timeout';
+  return 'poll';
+}
+
+export function parseVerifyScope(out) {
+  const m = String(out || '').match(/AGENT_LOOP_VERIFY_SCOPE:\s*(full|none|scoped)\s*(.*)$/im);
+  if (!m) return { kind: 'unstated' };
+  if (m[1] === 'full' || m[1] === 'none') return { kind: m[1] };
+  const rest = m[2] || '';
+  const suites = ((rest.match(/suites=([^\s]+)/) || [])[1] || '').split(',').filter(Boolean);
+  const filesRaw = (rest.match(/files=(\d+)/) || [])[1];
+  return { kind: 'scoped', suites, files: filesRaw != null ? Number(filesRaw) : undefined };
+}
+
+export function formatVerifyScopeLog(id, scope) {
+  if (!scope || scope.kind === 'unstated') return `  ${id} verify scope: unstated`;
+  if (scope.kind === 'scoped') {
+    const suites = (scope.suites || []).join(',') || '(none)';
+    const files = scope.files == null ? '?' : scope.files;
+    return `  ${id} verify scope: scoped suites=${suites} files=${files}`;
+  }
+  return `  ${id} verify scope: ${scope.kind}`;
+}
+
+export function landAfterPush({ ciDecision }) {
+  if (ciDecision === 'fail') return { committed: false, status: S.changes };
+  return { committed: true };
+}
 async function depsSatisfied(t) {
   for (const bid of blockerIds(t)) {
     const b = await getTask(bid).catch(() => null);
@@ -1651,42 +1931,201 @@ async function latestChangesComment(id) {
 // (measured: a 300ms cap returned only after the 12s grandchild finished). So: own timer and an
 // awaited, bounded tree-kill whose result is surfaced to the caller.
 const ACTIVE_CHILDREN = new Set();
+const WIN_JOBS = new Map(); // child pid → keeper job id
+let winJobKeeper = null;
+
+function parsePidPpidTable(text) {
+  const pairs = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)$/);
+    if (m) pairs.push([Number(m[1]), Number(m[2])]);
+  }
+  return pairs;
+}
+
+export function descendantsFromTable(rootPid, pairs) {
+  const kids = new Map();
+  for (const [pid, ppid] of pairs) {
+    if (!kids.has(ppid)) kids.set(ppid, []);
+    kids.get(ppid).push(pid);
+  }
+  const out = [];
+  const seen = new Set();
+  const stack = [...(kids.get(Number(rootPid)) || [])];
+  while (stack.length) {
+    const id = stack.pop();
+    if (seen.has(id) || id === Number(rootPid)) continue;
+    seen.add(id);
+    out.push(id);
+    for (const c of kids.get(id) || []) stack.push(c);
+  }
+  return out;
+}
+
+function listLiveDescendants(rootPid) {
+  if (!rootPid) return [];
+  try {
+    let text = '';
+    if (process.platform === 'win32') {
+      const rows = [];
+      const stack = [Number(rootPid)];
+      const seen = new Set();
+      while (stack.length) {
+        const id = stack.pop();
+        let out = '';
+        try {
+          out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+            `(Get-CimInstance Win32_Process -Filter "ParentProcessId=${id}").ProcessId`],
+            { encoding: 'utf8', timeout: 8_000, stdio: ['ignore', 'pipe', 'ignore'] });
+        } catch { continue; }
+        for (const tok of out.split(/\s+/)) {
+          const child = Number(tok);
+          if (!Number.isFinite(child) || child <= 0 || seen.has(child)) continue;
+          seen.add(child);
+          rows.push(`${child} ${id}`);
+          stack.push(child);
+        }
+      }
+      text = rows.join('\n');
+    } else if (existsSync('/proc')) {
+      const rows = [];
+      for (const name of readdirSync('/proc')) {
+        if (!/^\d+$/.test(name)) continue;
+        try {
+          const stat = readFileSync(`/proc/${name}/stat`, 'utf8');
+          const close = stat.lastIndexOf(')');
+          const rest = stat.slice(close + 2).trim().split(/\s+/);
+          rows.push(`${name} ${rest[1]}`);
+        } catch {}
+      }
+      text = rows.join('\n');
+    } else {
+      text = execFileSync('ps', ['-ao', 'pid=,ppid='], {
+        encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    }
+    return descendantsFromTable(rootPid, parsePidPpidTable(text)).filter(alive);
+  } catch {
+    return [];
+  }
+}
+
+function taskkillTree(pid) {
+  return new Promise(resolve => {
+    const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+      stdio: 'ignore', shell: false, windowsHide: true,
+    });
+    const cap = setTimeout(() => {
+      try { killer.kill('SIGKILL'); } catch {}
+      resolve({ code: -1, detail: `taskkill itself exceeded ${KILL_TREE_CAP_MS}ms` });
+    }, KILL_TREE_CAP_MS);
+    killer.on('error', e => { clearTimeout(cap); resolve({ code: -1, detail: `taskkill failed to start: ${e.message}` }); });
+    killer.on('close', code => { clearTimeout(cap); resolve({ code, detail: `taskkill exit ${code}` }); });
+  });
+}
+
+function ensureWinJobKeeper() {
+  if (winJobKeeper || process.platform !== 'win32') return winJobKeeper;
+  const script = [
+    '$jobs=@{}; $n=0',
+    "Add-Type @'",
+    'using System; using System.Runtime.InteropServices;',
+    'public class ALJob {',
+    '  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr CreateJobObject(IntPtr a, string n);',
+    '  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetInformationJobObject(IntPtr h, int c, IntPtr i, uint l);',
+    '  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool AssignProcessToJobObject(IntPtr j, IntPtr p);',
+    '  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool TerminateJobObject(IntPtr j, uint c);',
+    '  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);',
+    '  [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(uint a, bool inherit, int pid);',
+    '  [StructLayout(LayoutKind.Sequential)] public struct JOBOBJECT_BASIC_LIMIT_INFORMATION { public long PerProcessUserTimeLimit; public long PerJobUserTimeLimit; public uint LimitFlags; public UIntPtr MinWorkingSetSize; public UIntPtr MaxWorkingSetSize; public uint ActiveProcessLimit; public IntPtr Affinity; public uint PriorityClass; public uint SchedulingClass; }',
+    '  [StructLayout(LayoutKind.Sequential)] public struct IO_COUNTERS { public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount, ReadTransferCount, WriteTransferCount, OtherTransferCount; }',
+    '  [StructLayout(LayoutKind.Sequential)] public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION { public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation; public IO_COUNTERS IoInfo; public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed; }',
+    '  public static IntPtr CreateKillOnClose() { var h=CreateJobObject(IntPtr.Zero,null); var info=new JOBOBJECT_EXTENDED_LIMIT_INFORMATION(); info.BasicLimitInformation.LimitFlags=0x2000; int len=Marshal.SizeOf(info); IntPtr p=Marshal.AllocHGlobal(len); Marshal.StructureToPtr(info,p,false); SetInformationJobObject(h,9,p,(uint)len); Marshal.FreeHGlobal(p); return h; }',
+    '}',
+    "'@",
+    '[Console]::Out.WriteLine("READY"); [Console]::Out.Flush()',
+    'while (($line=[Console]::In.ReadLine()) -ne $null) {',
+    '  $p=$line.Split(" "); $cmd=$p[0]',
+    '  if ($cmd -eq "ASSIGN" -and $p.Length -ge 2) {',
+    '    $pid=[int]$p[1]; $h=[ALJob]::CreateKillOnClose(); $ph=[ALJob]::OpenProcess(0x1F0FFF,$false,$pid)',
+    '    if ($ph -eq [IntPtr]::Zero -or -not [ALJob]::AssignProcessToJobObject($h,$ph)) { [Console]::Out.WriteLine("ERR") }',
+    '    else { $n++; $jobs[$n]=$h; [Console]::Out.WriteLine("OK $n") }',
+    '    if ($ph -ne [IntPtr]::Zero) { [ALJob]::CloseHandle($ph) | Out-Null }',
+    '    [Console]::Out.Flush()',
+    '  } elseif ($cmd -eq "KILL" -and $p.Length -ge 2) {',
+    '    $id=[int]$p[1]',
+    '    if ($jobs.ContainsKey($id)) { [ALJob]::TerminateJobObject($jobs[$id],1) | Out-Null; [ALJob]::CloseHandle($jobs[$id]) | Out-Null; $jobs.Remove($id); [Console]::Out.WriteLine("OK") }',
+    '    else { [Console]::Out.WriteLine("ERR") }',
+    '    [Console]::Out.Flush()',
+    '  }',
+    '}',
+  ].join('\n');
+  try {
+    const proc = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
+    });
+    winJobKeeper = { proc, ready: false };
+    proc.stdout.on('data', chunk => {
+      winJobKeeper.ready = true;
+      winJobKeeper.buf = (winJobKeeper.buf || '') + chunk;
+      const lines = winJobKeeper.buf.split(/\r?\n/);
+      winJobKeeper.buf = lines.pop();
+      for (const line of lines) {
+        const m = String(line).trim().match(/^OK (\d+)$/);
+        if (m) {
+          const childPid = (winJobKeeper.pending || []).shift();
+          if (childPid) WIN_JOBS.set(childPid, Number(m[1]));
+        }
+      }
+    });
+    proc.on('exit', () => { winJobKeeper = { failed: true }; WIN_JOBS.clear(); });
+  } catch {
+    winJobKeeper = { failed: true };
+  }
+  return winJobKeeper;
+}
+
+function assignWinJob(pid) {
+  if (process.platform !== 'win32' || !pid) return;
+  const k = ensureWinJobKeeper();
+  if (!k || k.failed || !k.proc) return;
+  k.pending = k.pending || [];
+  k.pending.push(pid);
+  try { k.proc.stdin.write(`ASSIGN ${pid}\n`); } catch { k.pending.pop(); }
+}
+
+function killWinJob(pid) {
+  const id = WIN_JOBS.get(pid);
+  const k = winJobKeeper;
+  if (!id || !k || k.failed || !k.proc) return false;
+  try { k.proc.stdin.write(`KILL ${id}\n`); WIN_JOBS.delete(pid); return true; }
+  catch { return false; }
+}
+
 async function killTree(pid) {   // function decl: lock-loss handling references it above
   if (!pid) return { ok: true, detail: 'no pid' };
+  let jobKilled = false;
+  let taskkillCode = null;
   try {
-    if (process.platform !== 'win32') {
-      process.kill(-pid, 'SIGKILL');       // negative pid = the detached process group
-      return { ok: true, detail: 'SIGKILL sent to process group' };
+    if (process.platform === 'win32') {
+      jobKilled = killWinJob(pid);
+      const tk = await taskkillTree(pid);
+      taskkillCode = tk.code;
+    } else {
+      try { process.kill(-pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
     }
-    return await new Promise(resolve => {
-      let settled = false;
-      const finish = (ok, detail) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(cap);
-        resolve({ ok, detail });
-      };
-      const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
-        stdio: 'ignore', shell: false, windowsHide: true,
-      });
-      const cap = setTimeout(() => {
-        try { killer.kill('SIGKILL'); } catch {}
-        finish(false, `taskkill itself exceeded ${KILL_TREE_CAP_MS}ms`);
-      }, KILL_TREE_CAP_MS);
-      killer.on('error', e => finish(false, `taskkill failed to start: ${e.message}`));
-      killer.on('close', code => {
-        // Do NOT treat "root PID gone" alone as success when taskkill failed: descendants can
-        // reparent and keep editing while a new dispatcher takes the lock (audit: hard-stop race).
-        const rootGone = !alive(pid);
-        if (code === 0 && rootGone) finish(true, `taskkill exit 0; root gone`);
-        else if (code === 0 && !rootGone) finish(false, `taskkill exit 0 but root pid ${pid} still alive`);
-        else finish(false, `taskkill exit ${code}; root ${rootGone ? 'gone (descendants unverified)' : 'still alive'}`);
-      });
-    });
   } catch (e) {
-    if (e.code === 'ESRCH') return { ok: true, detail: 'process already gone' };
-    return { ok: false, detail: e.message };
+    if (e.code !== 'ESRCH') {
+      await new Promise(r => setTimeout(r, 200));
+      const live = listLiveDescendants(pid);
+      return resolveTreeKill({ rootAlive: alive(pid), liveDescendants: live, taskkillCode, jobKilled });
+    }
   }
+  await new Promise(r => setTimeout(r, 200));
+  const live = listLiveDescendants(pid);
+  return resolveTreeKill({
+    rootAlive: alive(pid), liveDescendants: live, taskkillCode, jobKilled,
+  });
 }
 // Env for agent/verify children: never inherit ClickUp or push credentials (audit: secret inheritance).
 // Also strip/redirect any pointer at the primary repo so a child cannot trivially `cd $AGENT_LOOP_REPO`.
@@ -1813,40 +2252,84 @@ export function agentChildEnv(base = process.env, { sandboxDir = null, primaryRe
   return env;
 }
 
-function runProc(cmd, { input, timeout, label, cwd, env, agent = false, stripProviderKeys = false } = {}) {
+function runProc(cmd, { input, timeout, idleTimeout, progressDir, label, cwd, env, agent = false, stripProviderKeys = false } = {}) {
   return new Promise(resolve => {
     const childEnv = env || (agent
       ? agentChildEnv(process.env, { sandboxDir: cwd || null, primaryRepo: REPO, stripProviderKeys })
       : process.env);
     const p = spawn(cmd, { cwd: cwd || REPO, shell: true, detached: process.platform !== 'win32', env: childEnv });
     ACTIVE_CHILDREN.add(p.pid);
+    assignWinJob(p.pid);
     let out = '', tail = '', settled = false, timingOut = false, outputTruncated = false;
+    let lastProgressAt = Date.now(), firstWriteMs = null, lastWriteMs = null, watcher = null, idleTimer = null;
     const OUTPUT_CAP = 8 * 1024 * 1024;
     const t0 = Date.now(), hb = heartbeatMs();
     const tick = label && hb > 0 ? setInterval(() => {
-      console.log(`   … ${label} ${mmss(Date.now() - t0)}${timeout ? `/${mmss(timeout)}` : ''}${tail ? ` — ${tail.slice(0, 110)}` : ''}`);
+      const cap = timeout ? `/${mmss(timeout)}` : '';
+      const idle = idleTimeout ? ` idle ${mmss(Date.now() - lastProgressAt)}/${mmss(idleTimeout)}` : '';
+      console.log(`   … ${label} ${mmss(Date.now() - t0)}${cap}${idle}${tail ? ` — ${tail.slice(0, 110)}` : ''}`);
     }, hb) : null;
     const done = r => {
       if (settled) return;                       // a tree-kill still fires 'close' afterwards — ignore it
       settled = true;
       if (tick) clearInterval(tick);
       if (killer) clearTimeout(killer);
+      if (idleTimer) clearTimeout(idleTimer);
+      if (watcher) { try { watcher.close(); } catch {} }
       // Keep the PID registered when tree-kill failed so hard-stop can retry; deleting it here
       // left orphan agents untracked (audit: ACTIVE_CHILDREN cleared on killFailed).
       if (!r.killFailed) ACTIVE_CHILDREN.delete(p.pid);
       resolve(r);
     };
-    const killer = timeout ? setTimeout(async () => {
+    const fireTimeout = async (reason) => {
+      if (settled || timingOut) return;
       timingOut = true;
       const killed = await killTree(p.pid);
+      const waited = reason === 'idle' ? idleTimeout : timeout;
       const note = killed.ok
-        ? `[agent-loop] TIMEOUT after ${mmss(timeout)} — killed process tree of pid ${p.pid} (${killed.detail})`
-        : `[agent-loop] TIMEOUT after ${mmss(timeout)} — PROCESS TREE KILL FAILED for pid ${p.pid} (${killed.detail})`;
+        ? `[agent-loop] TIMEOUT after ${mmss(waited)} (${reason}) — killed process tree of pid ${p.pid} (${killed.detail})`
+        : `[agent-loop] TIMEOUT after ${mmss(waited)} (${reason}) — PROCESS TREE KILL FAILED for pid ${p.pid} (${killed.detail})`;
       log(`  ✖ ${label || cmd.slice(0, 60)}: ${note}`);
-      done({ code: TIMEOUT_CODE, out: `${out}\n${note}`, killFailed: !killed.ok });
-      // If kill eventually succeeds on a later hard-stop attempt, shutdown will remove it.
+      done({
+        code: TIMEOUT_CODE, out: `${out}\n${note}`, killFailed: !killed.ok, killReason: reason,
+        firstWriteMs, lastWriteMs,
+      });
       if (killed.ok) ACTIVE_CHILDREN.delete(p.pid);
-    }, timeout) : null;
+    };
+    const armIdle = () => {
+      if (!idleTimeout || settled || timingOut) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      const now = Date.now();
+      const decision = progressDeadline({
+        now, startedAt: t0, lastProgressAt, idleMs: idleTimeout || 0, ceilingMs: timeout || 0,
+      });
+      if (decision.fire) { fireTimeout(decision.reason); return; }
+      const idleLeft = idleTimeout - (now - lastProgressAt);
+      const ceilingLeft = timeout ? (t0 + timeout - now) : Infinity;
+      const wait = Math.max(1, Math.min(idleLeft, ceilingLeft));
+      idleTimer = setTimeout(() => {
+        const next = progressDeadline({
+          now: Date.now(), startedAt: t0, lastProgressAt, idleMs: idleTimeout || 0, ceilingMs: timeout || 0,
+        });
+        if (next.fire) fireTimeout(next.reason);
+        else armIdle();
+      }, wait);
+    };
+    const noteProgress = ({ write = false } = {}) => {
+      lastProgressAt = Date.now();
+      if (write) {
+        const elapsed = lastProgressAt - t0;
+        if (firstWriteMs == null) firstWriteMs = elapsed;
+        lastWriteMs = elapsed;
+      }
+      armIdle();
+    };
+    if (progressDir) {
+      try { watcher = watch(progressDir, { recursive: true }, () => noteProgress({ write: true })); }
+      catch { /* watch is best-effort; stdout still counts as progress */ }
+    }
+    const killer = timeout ? setTimeout(() => fireTimeout('ceiling'), timeout) : null;
+    armIdle();
     const take = d => {
       out += d;
       if (out.length > OUTPUT_CAP) {
@@ -1854,14 +2337,21 @@ function runProc(cmd, { input, timeout, label, cwd, env, agent = false, stripPro
         outputTruncated = true;
       }
       const ls = String(d).split(/\r?\n/).filter(s => s.trim());
-      if (ls.length) tail = ls[ls.length - 1].trim();
+      if (ls.length) {
+        tail = ls[ls.length - 1].trim();
+        noteProgress();
+      }
     };
     p.stdout.on('data', take);
     p.stderr.on('data', take);
     p.stdin.on('error', () => {});             // EPIPE is expected when a child exits before stdin drains
     if (input != null) { try { p.stdin.write(input); p.stdin.end(); } catch {} }
-    p.on('close', code => { if (!timingOut) done({ code, out, outputTruncated }); });
-    p.on('error', err => { if (!timingOut) done({ code: 1, out: String(err), outputTruncated }); });
+    p.on('close', code => {
+      if (timingOut) return;
+      const maxTurns = agent && isMaxTurnsOutput(out) && code !== 0 && code !== TIMEOUT_CODE;
+      done({ code, out, outputTruncated, firstWriteMs, lastWriteMs, maxTurns });
+    });
+    p.on('error', err => { if (!timingOut) done({ code: 1, out: String(err), outputTruncated, firstWriteMs, lastWriteMs }); });
   });
 }
 // git gets a default cap and a non-interactive env: a credential prompt on `push` would otherwise
@@ -2008,6 +2498,10 @@ async function openAgentSandbox(branch, { createFrom = null, detachAt = null, al
     try { rmSync(dir, { recursive: true, force: true }); } catch {}
     return { ok: false, dir: null, branch, err: e.message };
   }
+  if (VERIFY_SEED_DIRS.length && !opts.selftest) {
+    try { seedSandboxDirs(dir); }
+    catch (e) { log(`  ⚠ sandbox seed failed (${e.message.slice(0, 200)}) — continuing without seeded deps`); }
+  }
   return sandboxHandle(dir, { branch, detachAt, createFrom });
 }
 
@@ -2120,7 +2614,11 @@ const PROMPT_DIR = mkdtempSync(join(tmpdir(), 'agent-loop-'));
 // repo-relative is even reachable by accident.
 const PROBE_CWD = mkdtempSync(join(tmpdir(), 'agent-loop-probe-'));
 // Own exit hook, NOT the lock's release: --check/--selftest never take the lock and would leak.
-process.on('exit', () => { try { rmSync(PROMPT_DIR, { recursive: true, force: true }); } catch {} try { rmSync(PROBE_CWD, { recursive: true, force: true }); } catch {} });
+process.on('exit', () => {
+  try { rmSync(PROMPT_DIR, { recursive: true, force: true }); } catch {}
+  try { rmSync(PROBE_CWD, { recursive: true, force: true }); } catch {}
+  try { winJobKeeper?.proc?.kill(); } catch {}
+});
 let promptSeq = 0;
 const writePrompt = txt => { const p = join(PROMPT_DIR, `p${++promptSeq}.txt`); writeFileSync(p, txt); return p; };
 const slug   = s => (s || 'task').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'task';
@@ -2176,8 +2674,10 @@ export async function resolveRescopeInspection(
 }
 
 // ---------- prompts ----------
-const implementPrompt = (t, ac, priorIssues) =>
+const implementPrompt = (t, ac, priorIssues, budget = {}) =>
 `You are the IMPLEMENTER in a code pipeline. You are running inside an isolated sandbox clone. Work ONLY under process.cwd() on the current git branch. Make the MINIMAL change that satisfies the task. Do NOT commit, push, switch branches, deploy, or open/edit any absolute path outside the sandbox (including any primary repo path). Only edit files in this working tree. Read AGENTS.md at the repo root for project rules first. When done, print a short summary of the files you changed.
+
+${implementBudgetText({ wallMs: budget.wallMs ?? IMPLEMENT_TIMEOUT_MS, idleMs: budget.idleMs ?? IMPLEMENT_IDLE_MS, remainingS: budget.remainingS ?? Math.round((budget.wallMs ?? IMPLEMENT_TIMEOUT_MS) / 1000) })}
 
 Acceptance criteria define the required target state, not a mandatory list of changed files. Inspect the sandbox start state before editing. If a requested cleanup/removal is already satisfied, do not manufacture a cosmetic, whitespace-only, or delete/re-add diff; report the already-satisfied state and continue with the task's real unmet requirements.
 
@@ -2273,7 +2773,7 @@ DIFF (reviewed SHA vs ${base}):
 ${diff}
 \`\`\`
 
-Output ONLY one JSON object, nothing else:
+Reply with EXACTLY one JSON object and no other text. A surrounding markdown fence is allowed only if the fence contains that single object. Any other prose makes the adjudication fail closed.
 {"verdict":"pass"|"fail","blocking_issues":["path:line — reproduced current-tree evidence"],"notes":"one or two sentences"}`;
 
 // `rounds` is the task's ACTUAL churn. Never assert "too big or mis-scoped" as a premise when the
@@ -2701,7 +3201,10 @@ async function implement(t, coder) {
     }
     const sandboxStartSha = await revParseAt(wt.dir, 'HEAD');
     const priorIssues = fixing ? await latestChangesComment(id) : '';
-    const prompt = implementPrompt(t, ac, priorIssues);
+    const prompt = implementPrompt(t, ac, priorIssues, {
+      wallMs: IMPLEMENT_TIMEOUT_MS, idleMs: IMPLEMENT_IDLE_MS,
+      remainingS: Math.round(IMPLEMENT_TIMEOUT_MS / 1000),
+    });
     let g;
     const label = `${coder} implement ${id}`;
     // Isolation here is defense-in-depth, not an OS jail (see agentChildEnv) — a coder given an
@@ -2710,13 +3213,27 @@ async function implement(t, coder) {
     // primary's status before/after the coder runs, exactly like reviewAndResolve() already does.
     const primaryBeforeCoder = await git('status --porcelain');
     if (primaryBeforeCoder.code !== 0) throw new FatalLoopError(`cannot snapshot primary tree before implement: ${primaryBeforeCoder.out.slice(0, 200)}`);
-    if (coder === 'grok') { const pf = writePrompt(prompt); g = await runProc(CMD.grok(pf), { timeout: IMPLEMENT_TIMEOUT_MS, label, cwd: wt.dir, agent: true }); }
-    else g = await runProc(CMD.claudeImplement(), { input: prompt, timeout: IMPLEMENT_TIMEOUT_MS, label, cwd: wt.dir, agent: true });
+    const implementProc = {
+      timeout: IMPLEMENT_TIMEOUT_MS,
+      idleTimeout: IMPLEMENT_IDLE_MS,
+      progressDir: wt.dir,
+      label,
+      cwd: wt.dir,
+      agent: true,
+    };
+    const implementStarted = Date.now();
+    if (coder === 'grok') { const pf = writePrompt(prompt); g = await runProc(CMD.grok(pf), implementProc); }
+    else g = await runProc(CMD.claudeImplement(), { ...implementProc, input: prompt });
+    log(`  ${id} ${coder} phase: ${formatImplementPhase({
+      firstWriteMs: g.firstWriteMs, lastWriteMs: g.lastWriteMs,
+      wallMs: Date.now() - implementStarted, killReason: g.killReason,
+    })}`);
 
     if (g.killFailed) {
       keepWorktree = true;
       throw new FatalLoopError(`${coder} timed out and its process tree could not be confirmed stopped; refusing to touch git while it may still be editing (worktree left at ${wt.dir})`, {
         preserveCoding: true, unsafeChild: true,
+        rescue: { sandboxDir: wt.dir, branch, taskId: id },
       });
     }
 
@@ -2743,6 +3260,7 @@ async function implement(t, coder) {
 
     if (g.code !== 0) {
       const timedOut = g.code === TIMEOUT_CODE;
+      const exitNote = timedOut ? ' (timeout)' : (g.maxTurns ? ' (max turns reached)' : '');
       let outcome = 'no changes produced';
       const add = await gAt('add -A');
       if (add.code !== 0) {
@@ -2750,9 +3268,9 @@ async function implement(t, coder) {
         keepWorktree = true;
         outcome = `could not stage the worktree (\`git add\` failed: ${add.out.trim().slice(0, 200)}); worktree PRESERVED at ${wt.dir}`;
         const rounds = bumpRounds(id);
-        await tryComment(id, `🔵 **${coder} FAILED** — exit ${g.code}${timedOut ? ' (timeout)' : ''}. ${outcome} → round ${rounds}/${MAX_ROUNDS}.\n\`\`\`\n${g.out.trim().slice(-1200)}\n\`\`\``);
-        log(`  ${id} ${coder} exited ${g.code}${timedOut ? ' (timeout)' : ''} → round ${rounds}/${MAX_ROUNDS}`);
-        if (rounds >= MAX_ROUNDS) await escalate(t, [`${coder} failed to complete ${MAX_ROUNDS} times (last exit ${g.code}${timedOut ? ', timeout' : ''})`], false);
+        await tryComment(id, `🔵 **${coder} FAILED** — exit ${g.code}${exitNote}. ${outcome} → round ${rounds}/${MAX_ROUNDS}.\n\`\`\`\n${g.out.trim().slice(-1200)}\n\`\`\``);
+        log(`  ${id} ${coder} exited ${g.code}${exitNote} → round ${rounds}/${MAX_ROUNDS}`);
+        if (rounds >= MAX_ROUNDS) await escalate(t, [`${coder} failed to complete ${MAX_ROUNDS} times (last exit ${g.code}${exitNote})`], false);
         else await setStatus(id, S.changes);
         throw new FatalLoopError(`implementation ${id}: git add failed after coder exit; worktree PRESERVED at ${wt.dir}`);
       }
@@ -2761,14 +3279,14 @@ async function implement(t, coder) {
         keepWorktree = true;
         outcome = `could not inspect staged work: ${diff.out.trim().slice(0, 200)}; worktree PRESERVED at ${wt.dir}`;
         const rounds = bumpRounds(id);
-        await tryComment(id, `🔵 **${coder} FAILED** — exit ${g.code}${timedOut ? ' (timeout)' : ''}. ${outcome} → round ${rounds}/${MAX_ROUNDS}.\n\`\`\`\n${g.out.trim().slice(-1200)}\n\`\`\``);
-        if (rounds >= MAX_ROUNDS) await escalate(t, [`${coder} failed to complete ${MAX_ROUNDS} times (last exit ${g.code}${timedOut ? ', timeout' : ''})`], false);
+        await tryComment(id, `🔵 **${coder} FAILED** — exit ${g.code}${exitNote}. ${outcome} → round ${rounds}/${MAX_ROUNDS}.\n\`\`\`\n${g.out.trim().slice(-1200)}\n\`\`\``);
+        if (rounds >= MAX_ROUNDS) await escalate(t, [`${coder} failed to complete ${MAX_ROUNDS} times (last exit ${g.code}${exitNote})`], false);
         else await setStatus(id, S.changes);
         throw new FatalLoopError(`implementation ${id}: staged-diff failed after coder exit; worktree PRESERVED at ${wt.dir}`);
       }
       if (diff.out.trim()) {
         try {
-          await commitOrPreserve(gAt, `${t.name} [PARTIAL — ${coder} exited ${g.code}${timedOut ? ' (timeout)' : ''}]\n\nClickUp ${id}. Not a finished attempt.\n`, `partial commit for ${id}`);
+          await commitOrPreserve(gAt, `${t.name} [PARTIAL — ${coder} exited ${g.code}${exitNote}]\n\nClickUp ${id}. Not a finished attempt.\n`, `partial commit for ${id}`);
           await importBranchFromSandbox(wt.dir, branch);
           outcome = 'partial work committed for inspection';
         } catch (e) {
@@ -2785,9 +3303,9 @@ async function implement(t, coder) {
         return false;
       }
       const rounds = bumpRounds(id);
-      await tryComment(id, `🔵 **${coder} FAILED** — exit ${g.code}${timedOut ? ' (timed out; process tree killed)' : ''}. ${outcome} → round ${rounds}/${MAX_ROUNDS}.\n\`\`\`\n${g.out.trim().slice(-1200)}\n\`\`\``);
-      log(`  ${id} ${coder} exited ${g.code}${timedOut ? ' (timeout)' : ''} → round ${rounds}/${MAX_ROUNDS}`);
-      if (rounds >= MAX_ROUNDS) await escalate(t, [`${coder} failed to complete ${MAX_ROUNDS} times (last exit ${g.code}${timedOut ? ', timeout' : ''})`], false);
+      await tryComment(id, `🔵 **${coder} FAILED** — exit ${g.code}${timedOut ? ' (timed out; process tree killed)' : exitNote}. ${outcome} → round ${rounds}/${MAX_ROUNDS}.\n\`\`\`\n${g.out.trim().slice(-1200)}\n\`\`\``);
+      log(`  ${id} ${coder} exited ${g.code}${exitNote} → round ${rounds}/${MAX_ROUNDS}`);
+      if (rounds >= MAX_ROUNDS) await escalate(t, [`${coder} failed to complete ${MAX_ROUNDS} times (last exit ${g.code}${exitNote})`], false);
       else await setStatus(id, S.changes);
       return false;
     }
@@ -2920,21 +3438,33 @@ async function reviewAndResolve(t, reviewer, onPass, escalateWithClaude, claudeU
           `adjudication ${id}: review sandbox is not the clean reviewed SHA ${tipBefore.slice(0, 8)}; refusing fact-check`,
         );
       }
-      const adjudication = await runProc(CMD.claude(), {
-        input: reviewAdjudicationPrompt(t, ac, diff, co.base, tipBefore, primaryVerdict),
-        timeout: REVIEW_TIMEOUT_MS,
-        label: `claude adjudicate ${id}`,
-        cwd: co.wt.dir,
-        agent: true,
-      });
-      if (adjudication.killFailed) {
-        keepWorktree = true;
-        throw new FatalLoopError(`Claude adjudication timed out and its process tree could not be confirmed stopped; sandbox left at ${co.wt.dir}`, {
-          preserveCoding: true, unsafeChild: true,
+      let adjudication = null;
+      let adjudicationVerdict = null;
+      let adjudicatorUnavailable = false;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const reminder = attempt === 1 ? '' : '\n\nYour previous reply was unparseable. Reply with EXACTLY one JSON object and no other text.\n';
+        adjudication = await runProc(CMD.claude(), {
+          input: reminder + reviewAdjudicationPrompt(t, ac, diff, co.base, tipBefore, primaryVerdict),
+          timeout: REVIEW_TIMEOUT_MS,
+          label: `claude adjudicate ${id}`,
+          cwd: co.wt.dir,
+          agent: true,
         });
+        if (adjudication.killFailed) {
+          keepWorktree = true;
+          throw new FatalLoopError(`Claude adjudication timed out and its process tree could not be confirmed stopped; sandbox left at ${co.wt.dir}`, {
+            preserveCoding: true, unsafeChild: true,
+            rescue: { sandboxDir: co.wt.dir, branch: co.branch, taskId: id },
+          });
+        }
+        adjudicationVerdict = extractVerdict(adjudication.out);
+        adjudicatorUnavailable = reviewerUnavailable(adjudicationVerdict, adjudication.code, adjudication.out);
+        const action = adjudicationRetryAction({
+          verdict: adjudicationVerdict, unavailable: adjudicatorUnavailable, attempt,
+        });
+        if (action !== 'retry') break;
+        log(`  ${id} Claude adjudication unparseable; retrying once`);
       }
-      const adjudicationVerdict = extractVerdict(adjudication.out);
-      const adjudicatorUnavailable = reviewerUnavailable(adjudicationVerdict, adjudication.code, adjudication.out);
       if (adjudicatorUnavailable) {
         await tryComment(id, `🟣 **Claude failure adjudication unavailable** (exit ${adjudication.code}) — retaining Codex's original verdict without pretending a second review occurred.\n\`\`\`\n${adjudication.out.trim().slice(-600)}\n\`\`\``);
         log(`  ${id} Claude adjudication unavailable; retaining Codex failure`);
@@ -3010,6 +3540,52 @@ async function reviewAndResolve(t, reviewer, onPass, escalateWithClaude, claudeU
   }
 }
 
+function seedSameVolume(a, b) {
+  try {
+    if (process.platform === 'win32') {
+      return pathWin32.parse(pathWin32.resolve(a)).root.toLowerCase() === pathWin32.parse(pathWin32.resolve(b)).root.toLowerCase();
+    }
+    return statSync(a).dev === statSync(b).dev;
+  } catch { return false; }
+}
+
+// Fill coder/reviewer clones from a cache of VERIFY_SEED_DIRS. Links come from the cache, never
+// from the primary repo — a writable junction into the operator's node_modules would corrupt it.
+export function seedSandboxDirs(destDir, { primary = REPO, dirs = VERIFY_SEED_DIRS, cacheDir = SEED_CACHE_DIR } = {}) {
+  for (const rel of dirs) {
+    if (!rel || rel.includes('..') || pathWin32.isAbsolute(rel) || pathPosix.isAbsolute(rel)) {
+      log(`  ⚠ seed skipped: ${rel} is not a repo-relative path`);
+      continue;
+    }
+    const src = join(primary, rel);
+    if (!existsSync(src)) { log(`  ⚠ seed skipped: ${rel} does not exist in ${primary}`); continue; }
+    const dest = join(destDir, rel);
+    if (existsSync(dest)) continue;
+    const cache = join(cacheDir, rel);
+    if (!existsSync(cache)) {
+      mkdirSync(dirname(cache), { recursive: true });
+      cpSync(src, cache, { recursive: true });
+    }
+    let isDir = true;
+    try { isDir = statSync(cache).isDirectory(); } catch { continue; }
+    const plan = seedPlan({
+      destExists: false, cacheExists: true, platform: process.platform,
+      sameVolume: seedSameVolume(cache, destDir), isDir,
+    });
+    mkdirSync(dirname(dest), { recursive: true });
+    try {
+      if (plan.action === 'junction') symlinkSync(cache, dest, 'junction');
+      else if (plan.action === 'symlink') symlinkSync(cache, dest);
+      else if (plan.action === 'hardlink') linkSync(cache, dest);
+      else cpSync(cache, dest, { recursive: true });
+    } catch (e) {
+      log(`  ⚠ seed ${rel} ${plan.action} failed (${e.message}); copying`);
+      try { cpSync(cache, dest, { recursive: true }); }
+      catch (e2) { log(`  ⚠ seed ${rel} copy failed: ${e2.message}`); }
+    }
+  }
+}
+
 // Copy each configured dir from the PRIMARY repo into the verify sandbox, so VERIFY reuses
 // already-installed dependencies instead of installing from scratch. Best-effort: a source dir that
 // doesn't exist (e.g. never installed, or a repo that doesn't need this) is skipped, not fatal — an
@@ -3077,6 +3653,93 @@ async function openVerifySandbox(reviewedSha) {
 
 // ---------- land (Commit/Push) — only ever reached after a Codex pass ----------
 // Always push the exact reviewed SHA (not a mutable branch tip that may have moved since review).
+function ciTokenFor(forge) {
+  if (forge === 'github') return process.env.AGENT_LOOP_GITHUB_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '';
+  if (forge === 'gitlab') return process.env.AGENT_LOOP_GITLAB_TOKEN || process.env.GITLAB_TOKEN || '';
+  return '';
+}
+
+export function summarizeForgeChecks({ checkRuns = [], statuses = [] }) {
+  let failed = 0, pending = 0, checkCount = 0;
+  const tails = [];
+  const failConc = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'stale', 'startup_failure', 'error']);
+  for (const run of checkRuns) {
+    checkCount++;
+    const conc = String(run.conclusion || '').toLowerCase();
+    const st = String(run.status || '').toLowerCase();
+    if (st !== 'completed' && !conc) pending++;
+    else if (failConc.has(conc)) {
+      failed++;
+      tails.push(`${run.name || 'check'}: ${conc}\n${String(run.output?.summary || run.output?.text || '').slice(0, 800)}`);
+    }
+  }
+  for (const s of statuses) {
+    checkCount++;
+    const st = String(s.state || s.status || '').toLowerCase();
+    if (st === 'pending' || st === 'running') pending++;
+    else if (st === 'failure' || st === 'error' || st === 'canceled' || st === 'cancelled' || st === 'failed') {
+      failed++;
+      tails.push(`${s.context || s.name || 'status'}: ${st}\n${String(s.description || s.target_url || '').slice(0, 800)}`);
+    }
+  }
+  return { checkCount, failed, pending, failTail: tails.join('\n\n').slice(-800) };
+}
+
+async function fetchForgeChecks(parsed, sha, token) {
+  if (parsed.forge === 'github') {
+    const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'agent-loop' };
+    const [cr, st] = await Promise.all([
+      fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/commits/${sha}/check-runs?per_page=100`, { headers, signal: AbortSignal.timeout(15_000) }),
+      fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/commits/${sha}/status`, { headers, signal: AbortSignal.timeout(15_000) }),
+    ]);
+    const checksJson = cr.ok ? await cr.json() : { check_runs: [] };
+    const statusJson = st.ok ? await st.json() : { statuses: [] };
+    return summarizeForgeChecks({ checkRuns: checksJson.check_runs || [], statuses: statusJson.statuses || [] });
+  }
+  if (parsed.forge === 'gitlab') {
+    const headers = { 'PRIVATE-TOKEN': token };
+    const id = encodeURIComponent(`${parsed.owner}/${parsed.repo}`);
+    const r = await fetch(`https://gitlab.com/api/v4/projects/${id}/repository/commits/${sha}/statuses`, {
+      headers, signal: AbortSignal.timeout(15_000),
+    });
+    const statuses = r.ok ? await r.json() : [];
+    return summarizeForgeChecks({ statuses: Array.isArray(statuses) ? statuses : [] });
+  }
+  return { checkCount: 0, failed: 0, pending: 0, failTail: '' };
+}
+
+async function waitForCi(sha) {
+  if (!CI_WAIT_MS) return { decision: 'skip-disabled', failTail: '' };
+  const remote = await git('remote get-url origin');
+  const parsed = forgeFromRemote(remote.code === 0 ? remote.out.trim() : '');
+  const token = ciTokenFor(parsed.forge);
+  const t0 = Date.now();
+  let decision = ciWaitDecision({
+    waitMs: CI_WAIT_MS, hasToken: !!token, forge: parsed.forge,
+    checkCount: 0, failed: 0, pending: 0, elapsedMs: 0,
+  });
+  let failTail = '';
+  while (decision === 'poll') {
+    try {
+      const summary = await fetchForgeChecks(parsed, sha, token);
+      failTail = summary.failTail || '';
+      decision = ciWaitDecision({
+        waitMs: CI_WAIT_MS, hasToken: true, forge: parsed.forge,
+        checkCount: summary.checkCount, failed: summary.failed, pending: summary.pending,
+        elapsedMs: Date.now() - t0,
+      });
+    } catch (e) {
+      log(`  ⚠ CI poll failed (${String(e.message || e).slice(0, 120)})`);
+      decision = ciWaitDecision({
+        waitMs: CI_WAIT_MS, hasToken: true, forge: parsed.forge,
+        checkCount: 0, failed: 0, pending: 1, elapsedMs: Date.now() - t0,
+      });
+    }
+    if (decision === 'poll') await sleep(CI_POLL_MS);
+  }
+  return { decision, failTail };
+}
+
 async function land(t, { branch, reviewedSha, reviewer = null }, escalateOnCap = false) {
   const id = t.id;
   if (!branch || !reviewedSha) throw new Error(`land(${id}): branch and reviewedSha are required`);
@@ -3099,6 +3762,7 @@ async function land(t, { branch, reviewedSha, reviewer = null }, escalateOnCap =
     // No dispose(): this sandbox is intentionally persistent (reused by the next verify call), never
     // a throwaway clone — see openVerifySandbox. A timed-out kill-failure just logs, nothing to keep.
     const v = await runProc(VERIFY, { timeout: VERIFY_TIMEOUT_MS, label: `verify ${id}`, cwd: vwt.dir, agent: true, stripProviderKeys: true });
+    log(formatVerifyScopeLog(id, parseVerifyScope(v.out)));
     if (v.killFailed) {
       throw new FatalLoopError(`verification for ${id} timed out and its process tree could not be confirmed stopped; sandbox left at ${vwt.dir}`, {
         unsafeChild: true,
@@ -3144,6 +3808,21 @@ async function land(t, { branch, reviewedSha, reviewer = null }, escalateOnCap =
     await setStatus(id, S.approved);
     return false;
   }
+  const ci = await waitForCi(reviewedSha);
+  const afterPush = landAfterPush({ ciDecision: ci.decision });
+  if (!afterPush.committed) {
+    const rounds = bumpRounds(id);
+    const tail = (ci.failTail || '').slice(-800);
+    await tryComment(id, `🟣 **PM** — forge checks FAILED for \`${sha}\` → **changes requested** (round ${rounds}/${MAX_ROUNDS}). Successors will not chain onto this branch.\n\`\`\`\n${tail || '(no job log tail)'}\n\`\`\``);
+    log(`  ${id} CI FAILED after push (${sha}) → changes requested (round ${rounds}/${MAX_ROUNDS})`);
+    if (rounds >= MAX_ROUNDS) {
+      await escalate(t, [`forge checks keep failing on a pushed SHA the reviewer approved`], escalateOnCap);
+      return false;
+    }
+    await setStatus(id, S.changes);
+    return false;
+  }
+  if (ci.decision !== 'skip-disabled') log(`  ${id} CI ${ci.decision} for ${sha}`);
   clearApprovedSha(id);
   resetOpsFailure(id);
   await tryComment(id, `🟣 **PM** — ${approvedBy}${VERIFY ? ' + verify green' : ''}. \`${sha}\` on \`${branch}\` (pushed). → **committed**. Deploy is human-gated.`);
@@ -3437,8 +4116,8 @@ async function stopSafely(when, { consistent = true } = {}) {
     : `🛑 Safety stop complete: inspect the handover report and resolve the recorded tree/task state before restarting.`);
 }
 
-function writeUnsafeStopReport(reason) {
-  const body = [
+function writeUnsafeStopReport(reason, rescue = null) {
+  const lines = [
     `# Agent Loop — UNSAFE child stop`,
     ``,
     `- stopped at: ${new Date().toISOString()}`,
@@ -3448,17 +4127,130 @@ function writeUnsafeStopReport(reason) {
     `It deliberately did not reset, stage, commit, switch branches, or change the task from \`coding\`.`,
     `Check running agent/node processes and the working tree before restarting.`,
     ``,
-  ].join('\n');
+    `To recover: \`node src/agent-loop.mjs --recover\``,
+    ``,
+  ];
+  if (rescue?.sandboxDir) {
+    lines.push(`## Rescue`, ``,
+      `- sandbox: \`${rescue.sandboxDir}\``,
+      rescue.branch ? `- branch: \`${rescue.branch}\`` : '',
+      rescue.taskId ? `- task: ${rescue.taskId}` : '',
+      rescue.headSha ? `- HEAD: \`${rescue.headSha}\`` : '',
+      `- manifest: \`${RESCUE_FILE}\``,
+      ``);
+  }
+  const body = lines.filter(l => l !== '').join('\n');
   try { writeFileSync(REPORT_FILE, body); log(`  unsafe-stop report → ${REPORT_FILE}`); }
   catch (e) { log(`  ⚠ could not write ${REPORT_FILE} (${e.message}); report follows:\n${body}`); }
+}
+
+function newestSandboxMtimeMs(dir) {
+  let newest = 0;
+  const walk = d => {
+    let entries;
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name === '.git') continue;
+      const p = join(d, e.name);
+      try {
+        if (e.isDirectory()) walk(p);
+        else newest = Math.max(newest, statSync(p).mtimeMs);
+      } catch {}
+    }
+  };
+  walk(dir);
+  return newest;
+}
+
+async function recoverUnsafe() {
+  let marker = null;
+  try { marker = JSON.parse(readFileSync(UNSAFE_FILE, 'utf8')); } catch {}
+  if (!marker) {
+    try { marker = JSON.parse(readFileSync(RESCUE_FILE, 'utf8')); } catch {}
+  }
+  if (!marker) {
+    console.error(`✖ nothing to recover: ${UNSAFE_FILE} is missing and so is ${RESCUE_FILE}.`);
+    process.exitCode = 1;
+    return;
+  }
+  const children = [...new Set([...(marker.children || []), marker.pid].filter(Boolean))];
+  const livePids = children.filter(alive).concat(children.flatMap(pid => listLiveDescendants(pid)));
+  const sandboxDir = marker.sandboxDir;
+  const stoppedAtMs = marker.at ? Date.parse(marker.at) : NaN;
+  const decision = recoverDecision({
+    livePids,
+    sandboxExists: !!(sandboxDir && existsSync(sandboxDir)),
+    newestMtimeMs: sandboxDir && existsSync(sandboxDir) ? newestSandboxMtimeMs(sandboxDir) : 0,
+    stoppedAtMs,
+    sandboxDir,
+  });
+  if (decision.action === 'refuse') {
+    console.error(`✖ --recover refused: ${decision.reason}`);
+    if (livePids.length) console.error(`  live pids: ${livePids.join(', ')}`);
+    process.exitCode = 1;
+    return;
+  }
+  const plan = [
+    `Will PARTIAL-commit preserved work in ${sandboxDir}`,
+    marker.branch ? `on ${marker.branch}` : '',
+    marker.taskId ? `for task ${marker.taskId}` : '',
+    `then move it to in review, clear the unsafe marker, and release the lock.`,
+  ].filter(Boolean).join(' ');
+  log(`--recover: ${plan}`);
+  if (!opts.yes) {
+    console.log('Proceed? Type y and Enter to continue, anything else to abort.');
+    const answer = await new Promise(resolve => {
+      const chunks = [];
+      process.stdin.setEncoding('utf8');
+      process.stdin.once('data', d => resolve(String(d).trim()));
+      process.stdin.resume();
+    });
+    try { process.stdin.pause(); } catch {}
+    if (answer.toLowerCase() !== 'y') {
+      console.error('aborted');
+      process.exitCode = 1;
+      return;
+    }
+  }
+  const gAt = (args, o) => gitAt(sandboxDir, args, o);
+  const add = await gAt('add -A');
+  if (add.code !== 0) {
+    console.error(`✖ git add failed in preserved sandbox: ${add.out.slice(0, 300)}`);
+    process.exitCode = 1;
+    return;
+  }
+  const branch = marker.branch;
+  const taskId = marker.taskId;
+  if (!branch) {
+    console.error('✖ marker has no branch; commit by hand in the preserved sandbox.');
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    await commitOrPreserve(gAt, `[PARTIAL — recovered after unsafe stop]\n\nClickUp ${taskId || '(unknown)'}. Recovered by --recover.\n`, `recover ${branch}`);
+    await importBranchFromSandbox(sandboxDir, branch);
+  } catch (e) {
+    console.error(`✖ recover commit/import failed: ${e.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (taskId) {
+    await tryComment(taskId, `🔵 **recovered** after an unsafe stop — PARTIAL commit imported from preserved sandbox \`${sandboxDir}\` → **in review**.`);
+    await setStatus(taskId, S.review);
+  }
+  clearUnsafeChildMarker();
+  allowLockRelease = true;
+  try { if (existsSync(LOCK_FILE)) unlinkSync(LOCK_FILE); } catch {}
+  log(`--recover complete: ${branch} imported, markers cleared, lock released`);
 }
 
 async function handleFatalStop(e) {
   log(`🛑 FATAL SAFETY STOP — ${e.message}`);
   if (e.unsafeChild) {
     // Fence: keep lock, write durable marker, do not run git/ClickUp while a child may live.
-    await markUnsafeChild(e.message);
-    writeUnsafeStopReport(e.message);
+    const rescue = e.rescue || null;
+    await markUnsafeChild(e.message, { rescue });
+    writeUnsafeStopReport(e.message, rescue ? { ...rescue, ...sandboxRescueSnapshot(rescue.sandboxDir) } : null);
     try { await Promise.all([...ACTIVE_CHILDREN].map(pid => killTree(pid))); } catch {}
     clearStop();
   } else {
@@ -3725,6 +4517,10 @@ async function pass() {
 
 // ---------- drivers ----------
 async function main() {
+  if (opts.recover) {
+    await recoverUnsafe();
+    return;
+  }
   if (opts.check) {
     log('check: verifying ClickUp token + board + required statuses…');
     const list = await getList();

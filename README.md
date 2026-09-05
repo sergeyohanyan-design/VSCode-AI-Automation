@@ -148,11 +148,11 @@ what you don't need — two keys are required, everything else has a working def
 |---|---|
 | **Required** | `CLICKUP_TOKEN`, `AGENT_LOOP_LIST_ID` |
 | **Your project** | base branch, repo path, project prompt contract |
-| **Verification** | repo-relative test command, sandbox location, dependency dirs to seed, test env file, deliberate primary-path opt-out |
+| **Verification** | repo-relative test command, sandbox location, dependency dirs to seed (coder/reviewer/verify), test env file, deliberate primary-path opt-out, parseable verify-scope line |
 | **Board vocabulary** | all 8 status names, both custom field names, the never-pick-up column |
 | **Agent commands** | the full CLI invocation for each agent — change model, flags, or binary |
-| **Timing** | poll interval, churn cap, per-stage timeouts, retry policy |
-| **State files** | lock, stop flag, log, handover report, churn tally |
+| **Timing** | poll interval, churn cap, per-stage timeouts, implement idle-progress cap, CLI turn budget, opt-in forge check wait, retry policy |
+| **State files** | lock, stop flag, log, handover report, churn tally, rescue manifest |
 
 Nothing about your board's vocabulary is hardcoded. If your workflow spells things differently,
 override the names; no code change is needed. `npm test` enforces this — a setting the dispatcher
@@ -170,6 +170,7 @@ reads but the example never documents fails the build.
 | **Agent Loop: Open the config file** | Open `~/.agent-loop.env`. |
 | **Agent Loop: Force Stop** | Kill now. May leave a task mid-implement; the next start recovers it. |
 | **Agent Loop: Open last handover report** | What the last Safe Stop left behind. |
+| **Agent Loop: Recover unsafe stop** | Commit preserved sandbox work after an unsafe-child stop, if no descendant is still alive. |
 
 ---
 

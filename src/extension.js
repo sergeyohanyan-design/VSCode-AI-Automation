@@ -227,6 +227,29 @@ function safeStop() {
 
 // Escape hatch: kills the terminal immediately. Can leave a task mid-implement (the next start
 // recovers `coding` to review when commits exist, otherwise ready), so it is a command, not default.
+function recoverUnsafeStop() {
+  const cwd = repoRoot();
+  if (!cwd) { vscode.window.showErrorMessage('Agent Loop: open a project folder first.'); return; }
+  if (!fs.existsSync(DISPATCHER)) {
+    vscode.window.showErrorMessage(`Agent Loop: the bundled dispatcher is missing (${DISPATCHER}). Reinstall the extension.`);
+    return;
+  }
+  const { lock, stop, report } = statePaths();
+  const term = vscode.window.createTerminal({
+    name: TERMINAL_NAME,
+    cwd,
+    env: {
+      AGENT_LOOP_REPO: cwd,
+      AGENT_LOOP_LOCK: lock,
+      AGENT_LOOP_STOP: stop,
+      AGENT_LOOP_STOP_REPORT: report,
+    },
+  });
+  activeTerminal = term;
+  term.show();
+  term.sendText(`node "${DISPATCHER}" --recover`);
+}
+
 function forceStop() {
   const term = findTerminal();
   if (!term) {
@@ -309,6 +332,7 @@ function activate(context) {
       if (!fs.existsSync(REPORT_FILE)) { vscode.window.showInformationMessage('Agent Loop: no handover report yet.'); return; }
       vscode.window.showTextDocument(await vscode.workspace.openTextDocument(REPORT_FILE));
     }),
+    vscode.commands.registerCommand('agentLoop.recover', recoverUnsafeStop),
   );
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);

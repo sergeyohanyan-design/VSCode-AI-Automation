@@ -83,7 +83,10 @@ list and let me correct it.
   `vendor`, a checked-in-nowhere test database, and so on. Verification runs in a
   fresh checkout, which has none of them, so anything missing here makes every
   single verification fail on a missing dependency unrelated to the change. This
-  becomes `AGENT_LOOP_VERIFY_SEED_DIRS`.
+  becomes `AGENT_LOOP_VERIFY_SEED_DIRS`. The same list is also seeded into coder
+  and reviewer clones (via a cache, never a writable link into the primary
+  checkout), so implement rounds do not reinstall dependencies out of their
+  time budget.
 - **The environment the suite needs, and whether it matches CI.** If the tests
   need a database, a queue or a cache, find out which engine **CI and production
   actually use**, then check what the suite would use here. Read the test config
@@ -104,7 +107,18 @@ list and let me correct it.
 
 - **Whether the test suite is slow.** If a full run takes more than about 20
   minutes, say so — `AGENT_LOOP_VERIFY_TIMEOUT_S` needs raising, or the command
-  needs narrowing.
+  needs narrowing. Implement rounds also have an idle-progress cap
+  (`AGENT_LOOP_IMPLEMENT_IDLE_S`, default 8 minutes of silence; `0` restores a
+  pure wall-clock cap). After a successful push, forge checks are **not** polled
+  unless you set `AGENT_LOOP_CI_WAIT_S` to a positive wait in seconds.
+
+A verify harness may print `AGENT_LOOP_VERIFY_SCOPE: full` or
+`AGENT_LOOP_VERIFY_SCOPE: scoped suites=… files=N` so the log can tell a
+handful of files from a full suite. Missing line is fine (`unstated`).
+
+If the dispatcher ever fences itself with an unsafe-child stop, recover with
+**Agent Loop: Recover unsafe stop** or `node …/agent-loop.mjs --recover`. Do
+not set `AGENT_LOOP_UNSAFE=1` — that variable is the marker **path**.
 
 ### Phase 3 — Set up the ClickUp board
 

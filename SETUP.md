@@ -205,7 +205,10 @@ copy is deliberate; absolute verifier paths outside the repo remain allowed.
 **`AGENT_LOOP_VERIFY_SEED_DIRS`** — if your test command needs gitignored
 dependency directories. A fresh checkout has no `node_modules/` or `vendor/`, so
 without this, verification fails on every run with a missing-dependency error
-that has nothing to do with the diff:
+that has nothing to do with the diff. The same list is now also seeded into
+coder and reviewer clones (via a cache of junctions/symlinks, never a writable
+link into your primary checkout), so implement rounds do not spend their budget
+reinstalling dependencies:
 
 ```
 AGENT_LOOP_VERIFY_SEED_DIRS=node_modules,vendor
@@ -222,6 +225,20 @@ engine; point it at the same environment file CI uses:
 ```
 AGENT_LOOP_VERIFY_ENV_FILE=/absolute/path/to/.env.testing
 ```
+
+Implement rounds are killed after 8 minutes of no output and no sandbox writes
+(`AGENT_LOOP_IMPLEMENT_IDLE_S`), or at the 20-minute wall-clock cap, whichever
+comes first. Set the idle cap to `0` for the old wall-clock-only behaviour.
+
+Forge checks after a successful push are **off** unless you set
+`AGENT_LOOP_CI_WAIT_S` to a positive number of seconds. A red check returns the
+task to `changes requested` so a successor cannot chain onto that branch. No
+checks configured, missing credentials, or still-pending at the cap are a skip,
+not a failure.
+
+A verify command may print `AGENT_LOOP_VERIFY_SCOPE: full` or
+`AGENT_LOOP_VERIFY_SCOPE: scoped suites=… files=N` so the log can tell a
+scoped run from a full suite.
 
 Optionally add a **project contract** at `tools/agent-loop.contract.md` in your
 repo — a short, imperative list of standing rules appended to every implement and
@@ -288,7 +305,12 @@ within about 10 minutes of a crash. To force it: **Agent Loop: Force Stop**, or
 delete `~/.agent-loop.lock` and `~/.agent-loop.stop`.
 
 **It refuses to start, citing an unsafe child.**
-A previous run detected an agent touching your primary repository, and fenced
-itself. Inspect the tree, then set `AGENT_LOOP_UNSAFE=1` for one run to clear it.
+A previous run could not confirm a timed-out agent was dead, and fenced itself.
+Inspect processes, then run **Agent Loop: Recover unsafe stop** (or
+`node src/agent-loop.mjs --recover`). That commits preserved sandbox work if
+nothing is still alive, moves the task to in review, and clears the marker.
+To clear by hand: delete `~/.agent-loop.unsafe` and `~/.agent-loop.lock` if the
+lock record carries `"unsafe":true`. Do not set `AGENT_LOOP_UNSAFE=1` — that
+env var is the **path** of the marker file, not a boolean clear-switch.
 
 The full audit log is `~/.agent-loop.log`.

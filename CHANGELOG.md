@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1
+
+- The example verify harness documents and implements the changed-tests rule: a run narrowed to the diff's own test files is only safe when the diff contains nothing but test files. A diff with any production file runs the whole suite. The tempting inverse (`if (changedTests.length) run just those`) wins on nearly every real task, because a feature ships with its own new test, so the suite never runs and the commit is proved only against tests written to pass. Backend-style tasks verify slower as a result; that is the intended cost.
+- `npm test` now exercises the example harness end to end against a throwaway git repo, asserting that a production-plus-test diff plans the full suite and a test-only diff passes its changed tests through unchanged.
+
 ## 1.1.0
 
 - Implement rounds use an idle-progress deadline (default 8 minutes of no stdout and no sandbox writes) plus the existing 20-minute wall-clock ceiling, so a coder that is still writing is not killed mid-verify. `AGENT_LOOP_IMPLEMENT_IDLE_S=0` restores the old wall-clock-only cap. The implement prompt is told the remaining budget; each round logs first-write / last-write / post-write times.

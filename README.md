@@ -195,7 +195,9 @@ Other examples in this repository:
   file appended to every implement and review prompt.
 - [`agent-loop-verify.example.mjs`](./examples/agent-loop-verify.example.mjs) — a selective
   verification harness, for when running the whole suite is too slow. Also the worked example of
-  loading test environment from a file rather than hardcoding an engine.
+  loading test environment from a file rather than hardcoding an engine, and of the one rule that
+  makes a narrowed run trustworthy: a diff is run against only its own changed tests when it
+  contains **nothing but** test files. One production file and the whole suite runs.
 
 ---
 

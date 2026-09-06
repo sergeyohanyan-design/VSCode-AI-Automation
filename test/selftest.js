@@ -231,4 +231,68 @@ for (const cmd of ['agentLoop.toggle', 'agentLoop.setup', 'agentLoop.checkBoard'
   assert.ok(pkg.contributes.commands.some(c => c.command === cmd), `package.json does not contribute ${cmd}`);
 }
 
+// ---------- the verify example reserves its focused run for test-only diffs ----------
+// A task that ships production code AND its own new test must run the WHOLE suite. The new test
+// passes by construction, so a run narrowed to it proves nothing about the coverage guards, cache
+// invalidation and other callers the change may have broken — CI would be the first to notice.
+// Exercised for real against a throwaway repo under os.tmpdir(): no network, no project touched.
+{
+  const { spawnSync } = require('node:child_process');
+  const os = require('node:os');
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-loop-verify-'));
+  const git = (...args) => {
+    const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+    return r;
+  };
+  const write = (rel, body) => {
+    fs.mkdirSync(path.join(repo, path.dirname(rel)), { recursive: true });
+    fs.writeFileSync(path.join(repo, rel), body);
+  };
+  // No package.json on purpose: the first suite command then fails immediately instead of reaching
+  // for the network, and the run is already over having printed which command it chose.
+  const runVerify = () => spawnSync(
+    process.execPath,
+    [path.join(ROOT, 'examples', 'agent-loop-verify.example.mjs')],
+    { cwd: repo, encoding: 'utf8', env: { ...process.env, AGENT_LOOP_BASE: 'main' } },
+  ).stdout;
+
+  try {
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'selftest');
+    // Local to this fixture only. A globally-configured signing key would otherwise block on a
+    // passphrase prompt and hang the suite.
+    git('config', 'commit.gpgsign', 'false');
+    write('README.md', 'base\n');
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    // The example diffs against origin/<base>, and a temp repo has no remote — point the ref here.
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    const base = git('rev-parse', 'HEAD').stdout.trim();
+
+    write('src/a.js', 'export const a = 1;\n');
+    write('src/a.test.js', 'test("a", () => {});\n');
+    git('add', '-A');
+    git('commit', '-qm', 'feature plus its own test');
+    const mixed = runVerify();
+    assert.ok(!/test-only/.test(mixed),
+      `a production+test diff must not take the focused path, got:\n${mixed}`);
+    assert.ok(/\$ npm run lint\r?\n/.test(mixed),
+      `a production+test diff must run the whole suite, got:\n${mixed}`);
+
+    git('reset', '-q', '--hard', base);
+    write('src/a.test.js', 'test("a", () => {});\n');
+    git('add', '-A');
+    git('commit', '-qm', 'test only');
+    const testOnly = runVerify();
+    assert.ok(/test-only/.test(testOnly),
+      `a test-only diff must take the focused path, got:\n${testOnly}`);
+    assert.ok(testOnly.includes('$ npm run lint -- src/a.test.js'),
+      `a test-only diff must pass its changed tests through unchanged, got:\n${testOnly}`);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+}
+
 console.log('agent-loop selftest: OK');

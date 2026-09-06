@@ -240,6 +240,14 @@ A verify command may print `AGENT_LOOP_VERIFY_SCOPE: full` or
 `AGENT_LOOP_VERIFY_SCOPE: scoped suites=… files=N` so the log can tell a
 scoped run from a full suite.
 
+**If you narrow the run, narrow it safely.** The tempting shortcut is to hand
+the runner only the test files the diff changed. Nearly every task ships
+production code *and* a new test for it, so that shortcut wins on almost every
+task and the real suite never runs — the commit is proved against nothing but a
+test written to pass, and CI is the first thing to see what it broke. Run the
+changed tests alone only when the diff contains **nothing but** test files. One
+production file in the diff means the full suite, however slow that is.
+
 Optionally add a **project contract** at `tools/agent-loop.contract.md` in your
 repo — a short, imperative list of standing rules appended to every implement and
 review prompt. See [`examples/agent-loop.contract.example.md`](./examples/agent-loop.contract.example.md).

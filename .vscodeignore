@@ -1,6 +1,7 @@
 .github/**
 .vscode/**
 .claude/**
+PLAN/**
 .gitignore
 **/*.map
 node_modules/**
@@ -12,4 +13,3 @@ CLAUDE.md
 CONTRIBUTING.md
 COMMERCIAL-LICENSING.md
 AI_Setup.md
-PLAN/**

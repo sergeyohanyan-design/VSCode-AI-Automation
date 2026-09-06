@@ -105,8 +105,8 @@ jobs:
       # pushed to real users as an update.
       #
       # Open VSX only, by decision — not by oversight. The VS Code Marketplace is uploaded by hand
-      # from https://marketplace.visualstudio.com/manage (see CLAUDE.md step 6), because every
-      # automated route is currently a dead end here:
+      # from https://marketplace.visualstudio.com/manage because every automated route is currently
+      # a dead end here:
       #   - an Azure DevOps *global* PAT works today but Microsoft retires it on 2026-12-01;
       #   - the sanctioned replacement (Entra ID workload identity + `vsce publish
       #     --azure-credential`) wants a user-assigned managed identity, which needs an Azure

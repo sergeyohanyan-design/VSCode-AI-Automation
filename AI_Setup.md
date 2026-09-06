@@ -116,6 +116,12 @@ A verify harness may print `AGENT_LOOP_VERIFY_SCOPE: full` or
 `AGENT_LOOP_VERIFY_SCOPE: scoped suites=… files=N` so the log can tell a
 handful of files from a full suite. Missing line is fine (`unstated`).
 
+If the harness narrows what it runs, it must narrow on the *whole* diff, not on
+the changed test files. A diff that contains any production file runs the full
+suite; only a test-only diff may be run against its changed tests alone.
+Otherwise the fast path wins on nearly every task and verification proves
+nothing.
+
 If the dispatcher ever fences itself with an unsafe-child stop, recover with
 **Agent Loop: Recover unsafe stop** or `node …/agent-loop.mjs --recover`. Do
 not set `AGENT_LOOP_UNSAFE=1` — that variable is the marker **path**.

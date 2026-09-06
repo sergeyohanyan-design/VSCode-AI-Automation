@@ -85,6 +85,33 @@ const SUITES = [
   { name: 'frontend', when: /^(web|client|frontend)\//,  run: 'npm run test:web' },
 ];
 
+// ─── The changed-tests trap — read before you narrow this any further ────────
+//
+//  The tempting next step is to stop running whole suites and hand the runner
+//  the diff's own test files instead:
+//
+//      if (changedTests.length) sh(`${suite.run} ${changedTests}`);   // WRONG
+//
+//  Nearly every real task ships production code AND a new test for it, so that
+//  branch wins on almost every task and the suite never runs. The commit is then
+//  proved against nothing but tests written by the author to pass. Everything it
+//  breaks elsewhere — coverage guards that assert every table or column is
+//  registered, cache and artifact invalidation detectors, other callers of a
+//  shared write path narrowed for one caller, any pre-existing test over the
+//  edited code — stays unrun until CI, and the loop pushes a red commit having
+//  reported green.
+//
+//  So the focused run is reserved for diffs that touch ONLY test files. A
+//  test-only edit cannot break another suite. One production file in the diff
+//  and the whole suite runs, however slow that is: a fast verify that cannot
+//  fail is worth nothing. Do not claw the time back with a dependency-graph
+//  heuristic that guesses which suites a file can reach — those guesses are
+//  exactly what lets the breakage through.
+//
+//  Rewrite this pattern for your own layout; it must agree with wherever your
+//  tests actually live, or a production file will be mistaken for a test.
+const TEST_FILE = /(^|\/)(tests?|spec|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
+
 function sh(cmd) {
   console.log(`\n$ ${cmd}`);
   return spawnSync(cmd, { shell: true, stdio: 'inherit', encoding: 'utf8' }).status ?? 1;
@@ -104,6 +131,9 @@ function changedFiles() {
 }
 
 const files = changedFiles();
+// An empty or uncomputable diff returns null above, so this can never pass
+// vacuously on zero files.
+const testOnly = files !== null && files.every(f => TEST_FILE.test(f));
 const selected = files === null
   ? SUITES
   : SUITES.filter(s => files.some(f => s.when.test(f)));
@@ -119,6 +149,9 @@ if (files === null) {
 } else {
   console.log(`AGENT_LOOP_VERIFY_SCOPE: scoped suites=${selected.map(s => s.name).join(',')} files=${files.length}`);
 }
+if (testOnly) {
+  console.log('verify: diff is test-only — running just the changed test files');
+}
 console.log(`verify: running ${selected.map(s => s.name).join(', ')}`);
 
 if (existsSync('package.json') && !existsSync('node_modules')) {
@@ -127,7 +160,10 @@ if (existsSync('package.json') && !existsSync('node_modules')) {
 }
 
 for (const suite of selected) {
-  const code = sh(suite.run);
+  // Non-empty only on a test-only diff — see "the changed-tests trap" above.
+  // `--` is how npm passes arguments through to a script; your runner may differ.
+  const focus = testOnly ? files.filter(f => suite.when.test(f)) : [];
+  const code = sh(focus.length ? `${suite.run} -- ${focus.join(' ')}` : suite.run);
   if (code !== 0) {
     console.error(`\nverify: ${suite.name} FAILED (exit ${code})`);
     process.exit(code);

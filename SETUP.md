@@ -230,6 +230,12 @@ Implement rounds are killed after 8 minutes of no output and no sandbox writes
 (`AGENT_LOOP_IMPLEMENT_IDLE_S`), or at the 20-minute wall-clock cap, whichever
 comes first. Set the idle cap to `0` for the old wall-clock-only behaviour.
 
+A task that fails review `AGENT_LOOP_MAX_ROUNDS` times (default 5) is escalated
+to a Claude re-scope. `AGENT_LOOP_MAX_RESCOPES` (default 1) is how many of those
+automatic repairs it may receive; 0 disables auto-repair, so the first churn cap
+parks the task on `stalled` for a human. Capping rounds harder, or shrinking the
+task, does not stop this: size does not predict churn.
+
 Forge checks after a successful push are **off** unless you set
 `AGENT_LOOP_CI_WAIT_S` to a positive number of seconds. A red check returns the
 task to `changes requested` so a successor cannot chain onto that branch. No
@@ -302,7 +308,8 @@ Read the review comments. The same objection re-raised 5 rounds running means
 the task is mis-scoped, not that the agent is failing —
 [`examples/TASK_AUTHORING.md`](./examples/TASK_AUTHORING.md) §4.1 and §6 cover
 this in full. The loop escalates it automatically after
-`AGENT_LOOP_MAX_ROUNDS` rounds.
+`AGENT_LOOP_MAX_ROUNDS` rounds, then allows `AGENT_LOOP_MAX_RESCOPES`
+(default 1) Claude auto-repairs before parking on `stalled`.
 
 **Verification fails on every task with a missing dependency.**
 Set `AGENT_LOOP_VERIFY_SEED_DIRS` (step 5).

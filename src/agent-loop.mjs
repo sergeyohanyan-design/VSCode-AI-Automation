@@ -227,6 +227,12 @@ export function num(envName, dflt, min, max = TIMER_MAX_S) {   // default bound,
 }
 const POLL       = num('AGENT_LOOP_POLL', 60, 5, 86_400);   // <5s hammers the ClickUp API; >1 day is nonsense
 const MAX_ROUNDS = num('AGENT_LOOP_MAX_ROUNDS', 5, 1, 100); // must be >=1 or escalation never fires
+// A successful AC auto-repair resets the round tally, so MAX_ROUNDS alone caps nothing: every
+// re-scope hands the task a fresh budget. Observed 2026-09-13/14: GP32 re-scoped twice and was
+// entitled to 3 x MAX_ROUNDS (~15) rounds; it burned ~10 and grew to 3542 diff lines. This is the
+// durable cap on RECOVERY ATTEMPTS, deliberately NOT reset by the auto-repair it governs.
+// 0 disables auto-repair entirely (the first churn cap parks on `stalled` for a human).
+const MAX_RESCOPES = num('AGENT_LOOP_MAX_RESCOPES', 1, 0, 20);
 // Terminal heartbeat cadence for long agent stages. 0 disables. Read per call so --selftest can shorten it.
 const heartbeatMs = () => num('AGENT_LOOP_HEARTBEAT_S', 30, 0, 86_400) * 1000;
 // No TTY here: git must fail fast instead of waiting on a credential prompt that nothing can answer.
@@ -1002,6 +1008,19 @@ async function selftest() {
   // The re-scope prompt must not hand Claude "it is too big" as a premise for a task that never
   // exhausted its rounds — that false premise is what turns a no-op stall into a split diagnosis.
   const fakeStalled = { name: 'probe task' };
+  // The re-scope budget must SURVIVE the resetRounds() that auto-repair performs - that reset is
+  // exactly what made MAX_ROUNDS uncappable. Uses a throwaway id and cleans up after itself.
+  const rescopeBudget = (() => {
+    const k = 'selftest-rescope-probe';
+    resetRescopes(k);
+    const first = bumpRescope(k);
+    resetRounds(k);                       // what auto-repair does to the round tally
+    const survived = rescopesOf(k);       // must be untouched by that reset
+    resetRescopes(k);
+    return first === 1 && survived === 1 && rescopesOf(k) === 0;
+  })();
+  if (!rescopeBudget) console.log('  re-scope budget probe: failed');
+
   const partialRounds = Math.max(1, MAX_ROUNDS - 1);
   const rescopePartial = reScopePrompt(fakeStalled, 'ac', 'issues', partialRounds);
   const rescopeFull = reScopePrompt(fakeStalled, 'ac', 'issues', MAX_ROUNDS);
@@ -1243,10 +1262,10 @@ async function selftest() {
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
     && cuRetryClass && quotaReset && attribution
     && c && d && e && implementCap && idleCap && idleDeadline && idleLive && budgetProbe && phaseProbe && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w
-    && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && chainBaseSelection && parkedReviewRouting && rollup
+    && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && rescopeBudget && chainBaseSelection && parkedReviewRouting && rollup
     && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication
     && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe;
-  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution})`);
+  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution})`);
   process.exit(good ? 0 : 1);
 }
 
@@ -2910,6 +2929,11 @@ const roundsOf     = id => ROUNDS.get(id) || 0;
 const resetRounds = id => { ROUNDS.delete(id); saveRounds(); };
 // Operational failures (worktree/clone open, land prep) use a separate key so they don't confuse review churn.
 const bumpOpsFailure = id => bumpRounds(`ops:${id}`);
+// Re-scope budget: a separate key so it survives the resetRounds() that auto-repair performs.
+// Cleared only when the task leaves the automatic recovery path (committed, or parked for a human).
+const rescopesOf    = id => ROUNDS.get(`rescope:${id}`) || 0;
+const bumpRescope   = id => bumpRounds(`rescope:${id}`);
+const resetRescopes = id => { ROUNDS.delete(`rescope:${id}`); saveRounds(); };
 const resetOpsFailure = id => { ROUNDS.delete(`ops:${id}`); saveRounds(); };
 
 // Persisted reviewer-approved SHAs for tasks parked on `approved` (Claude was down at pass time).
@@ -3828,6 +3852,7 @@ async function land(t, { branch, reviewedSha, reviewer = null }, escalateOnCap =
   await tryComment(id, `🟣 **PM** — ${approvedBy}${VERIFY ? ' + verify green' : ''}. \`${sha}\` on \`${branch}\` (pushed). → **committed**. Deploy is human-gated.`);
   await setStatus(id, S.committed);
   resetRounds(id);
+  resetRescopes(id);
   log(`review ${id} committed (${sha}, pushed)`);
   return true;
 }
@@ -3841,6 +3866,12 @@ async function land(t, { branch, reviewedSha, reviewer = null }, escalateOnCap =
 // unkillable timeout) propagates uncaught, exactly as it did before this was split out of escalate().
 async function resolveStalledWithClaude(t, issuesText) {
   const id = t.id;
+  // Checked before the sandbox and the Claude call: a spent budget costs nothing to refuse.
+  if (rescopesOf(id) >= MAX_RESCOPES) {
+    log(`  ${id} re-scope budget spent (${rescopesOf(id)}/${MAX_RESCOPES}) → stalled for a human`);
+    await tryComment(id, `🛑 **PM** — already auto-repaired ${rescopesOf(id)}/${MAX_RESCOPES} time(s) and churned again (${roundsOf(id)}/${MAX_ROUNDS} rounds). Refusing another automatic re-scope → **stalled** for a human to split or re-write the contract.`);
+    return false;
+  }
   log(`  ${id} Claude re-scope diagnosis`);
   // Isolated detached clone + sanitized env — never inherit CLICKUP_TOKEN or run on the primary tree.
   // Diagnose the exact task branch. Falling back to primary HEAD is unsafe: task/predecessor-only
@@ -3893,8 +3924,9 @@ async function resolveStalledWithClaude(t, issuesText) {
     const diagnosis = o.out.trim();
     const fix = extractDescriptionFix(o.out);
     if (fix) {
+      const spent = bumpRescope(id);
       await setDescription(id, fix);
-      await tryComment(id, `🟣 **Claude — AC contradiction auto-repaired** (churned ${roundsOf(id)}/${MAX_ROUNDS} rounds):\n${diagnosis.slice(0, 1200)}\n\nDescription replaced with the corrected contract above → **ready** for a clean Agent Loop attempt.`);
+      await tryComment(id, `🟣 **Claude — AC contradiction auto-repaired** (churned ${roundsOf(id)}/${MAX_ROUNDS} rounds; re-scope ${spent}/${MAX_RESCOPES}):\n${diagnosis.slice(0, 1200)}\n\nDescription replaced with the corrected contract above → **ready** for a clean Agent Loop attempt.`);
       await setStatus(id, S.ready);
       resetRounds(id);
       return true;
@@ -3914,6 +3946,7 @@ async function escalate(t, issues, withClaude) {
   await tryComment(id, `🛑 **PM** — hit ${MAX_ROUNDS} review rounds without converging → **stalled** for a human to split/re-scope.`);
   await setStatus(id, S.stalled);
   resetRounds(id);
+  resetRescopes(id); // a human now owns it; their re-scope starts from a clean budget
 }
 
 // ---------- coding lane: implement then review + resolve ----------

@@ -98,7 +98,7 @@ ready → coding → in review → changes requested → approved → committed
 | `changes requested` | open | Review failed; will be re-implemented, fixing exactly the stated issues. |
 | `approved` | open | Codex approved it but Claude wasn't up to actually commit/push it yet — parked for PM housekeeping to land later. |
 | `blocked` | open | Something needs a human (missing branch, land error, dependency problem) — not part of normal flow. |
-| `stalled` | open | Churned `AGENT_LOOP_MAX_ROUNDS` (default 5) review rounds without converging. Claude gets one auto-repair attempt (fixable AC contradiction → straight back to `ready`, no human step); only a genuine multi-concern split, or Claude being unavailable, leaves it here for a human (see §6). |
+| `stalled` | open | Churned `AGENT_LOOP_MAX_ROUNDS` (default 5) review rounds without converging. Claude gets one auto-repair attempt, bounded by `AGENT_LOOP_MAX_RESCOPES` (default 1): a fixable AC contradiction → straight back to `ready` with no human step; a genuine multi-concern split, Claude being unavailable, or a spent re-scope budget leaves it here for a human (see §6). |
 | `committed` | **done** | The task's branch was reviewed and pushed to the base branch. **This one MUST be configured with status type `done`** — dependency gating (`statusDone()`) only treats `done`/`closed`-typed statuses as "this blocker is finished." If `committed` is left as a plain "open"/"custom" status, every downstream chained task will wait forever. When adding it in ClickUp's status editor, pick the "Done" category (not "Active"/"Closed") for this status. |
 
 Do **not** reuse your Space's default statuses (`to do` / `in progress` / `complete` etc.) for
@@ -287,20 +287,24 @@ former successor, not just the task itself.
 ## 6. When a task gets stuck (`stalled`)
 
 If a task fails review `AGENT_LOOP_MAX_ROUNDS` times (default 5) without converging, it gets ONE
-**Claude re-scope diagnosis** (Opus): is this one task bundling multiple concerns, or does it have a
-fixable AC/description contradiction (a scope guard forbidding what an AC item demands, a stale
-requirement, a missing prerequisite note)?
+**Claude re-scope diagnosis** (Opus). That ONE is now enforced by `AGENT_LOOP_MAX_RESCOPES`
+(default 1; 0 disables auto-repair so the first churn cap parks on `stalled` for a human): is this
+one task bundling multiple concerns, or does it have a fixable AC/description contradiction (a
+scope guard forbidding what an AC item demands, a stale requirement, a missing prerequisite note)?
 
 - **Fixable contradiction, Claude available:** Claude hands back the corrected description; the
   dispatcher (never the re-scope call itself — it holds no ClickUp token) applies it, posts a
   `🟣 Claude — AC contradiction auto-repaired` comment, and returns the task straight to **`ready`**.
-  Nothing stops; no human step. The same auto-repair attempt also runs on any task that is ALREADY
+  Nothing stops; no human step — until the re-scope budget is spent, after which the next churn
+  parks on `stalled` for a human. The same auto-repair attempt also runs on any task that is ALREADY
   `stalled` at the top of a pass (e.g. left over from a run where Claude was down), so a `stalled`
-  task doesn't need Claude to be up at the *original* failure — only at some later pass.
-- **Genuine multi-concern split, or Claude unavailable to diagnose it:** the task moves to
+  task doesn't need Claude to be up at the *original* failure — only at some later pass, and only
+  if budget remains.
+- **Genuine multi-concern split, Claude unavailable to diagnose it, or the re-scope budget already spent:** the task moves to
   **`stalled`** and the dispatcher stops before probes/new work — this is the one case still left as
   a deliberate human checkpoint, because splitting into subtasks is a judgment call this dispatcher
-  doesn't automate.
+  doesn't automate. A spent `AGENT_LOOP_MAX_RESCOPES` budget is refused before opening the sandbox
+  or spending the Claude call.
 
 To resolve a task that is genuinely stuck on `stalled` (split needed, or Claude was down for every
 attempt so far):

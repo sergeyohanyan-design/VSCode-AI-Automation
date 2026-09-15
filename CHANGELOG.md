@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.2
+
+- Hitting `AGENT_LOOP_MAX_ROUNDS` triggered a Claude re-scope, and a successful AC auto-repair called `resetRounds()` before returning the task to `ready`. Nothing counted the re-scopes, so every repair handed the task a fresh round budget. Measured on a real chain: one task re-scoped twice, was entitled to ~15 rounds, burned ~10, and grew its diff from 2180 to 3542 lines — while the durable tally never read above 4/5, which is why the cap looked like it never fired. `AGENT_LOOP_MAX_RESCOPES` (default 1) now bounds automatic repairs; 0 disables auto-repair entirely, so the first churn cap parks on `stalled` for a human. Capping rounds harder, or shrinking the task, does not work: size does not predict churn. The selftest probe `rescopeBudget` fails if the re-scope tally shares the round key that auto-repair resets.
+
 ## 1.1.1
 
 - The example verify harness documents and implements the changed-tests rule: a run narrowed to the diff's own test files is only safe when the diff contains nothing but test files. A diff with any production file runs the whole suite. The tempting inverse (`if (changedTests.length) run just those`) wins on nearly every real task, because a feature ships with its own new test, so the suite never runs and the commit is proved only against tests written to pass. Backend-style tasks verify slower as a result; that is the intended cost.

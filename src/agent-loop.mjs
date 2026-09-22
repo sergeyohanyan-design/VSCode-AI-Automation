@@ -127,7 +127,7 @@
  *   AGENT_LOOP_POLL (watch interval s, default 60), AGENT_LOOP_MAX_ROUNDS (default 5),
  *   AGENT_LOOP_HEARTBEAT_S (terminal progress tick during long agent stages, default 30, 0=off),
  *   AGENT_LOOP_IMPLEMENT_TIMEOUT_S (default 1200, absolute ceiling) /
- *   AGENT_LOOP_IMPLEMENT_IDLE_S (default 480; 0 = wall-clock only) / _REVIEW_TIMEOUT_S (600) /
+ *   AGENT_LOOP_IMPLEMENT_IDLE_S (default 480; no output, no writes, and no CPU growth; 0 = wall-clock only) / _REVIEW_TIMEOUT_S (600) /
  *   _VERIFY_TIMEOUT_S (1500) — raise the verify cap for a slow full-suite gate,
  *   AGENT_LOOP_CI_WAIT_S (default 0 = do not poll forge checks after push),
  *   AGENT_LOOP_GIT_TIMEOUT_S (default 120), AGENT_LOOP_CLICKUP_TIMEOUT_S (default 30),
@@ -1827,7 +1827,7 @@ export function implementBudgetText({ wallMs, idleMs, remainingS }) {
   const remaining = Number.isFinite(remainingS) ? remainingS : Math.round((wallMs || 0) / 1000);
   let text = `TIME BUDGET: wall-clock cap ${mmss(wallMs)}. Remaining at start: ${remaining}s.`;
   if (idleMs > 0) {
-    text += ` Also stopped after ${mmss(idleMs)} with no output and no file writes.`;
+    text += ` Also stopped after ${mmss(idleMs)} with no output, no file writes, and no process-tree CPU growth. Working in silence is not idle.`;
   }
   text += ' Implement FIRST. Verify LAST. If a long test run will not finish inside the remaining budget, stop and leave the tree — the dispatcher will commit what you have. Do not start a verification you cannot finish.';
   return text;

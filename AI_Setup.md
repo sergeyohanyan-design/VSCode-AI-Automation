@@ -108,9 +108,13 @@ list and let me correct it.
 - **Whether the test suite is slow.** If a full run takes more than about 20
   minutes, say so — `AGENT_LOOP_VERIFY_TIMEOUT_S` needs raising, or the command
   needs narrowing. Implement rounds also have an idle-progress cap
-  (`AGENT_LOOP_IMPLEMENT_IDLE_S`, default 8 minutes of silence; `0` restores a
-  pure wall-clock cap). After a successful push, forge checks are **not** polled
-  unless you set `AGENT_LOOP_CI_WAIT_S` to a positive wait in seconds.
+  (`AGENT_LOOP_IMPLEMENT_IDLE_S`, default 8 minutes). Silence alone does not
+  stop a round: stdout, sandbox writes, or process-tree CPU growth each count
+  as progress. A truly idle process is stopped after about two windows, because
+  the first one only records a CPU baseline. Unreadable CPU waits for the wall
+  cap. `0` restores a pure wall-clock cap. After a successful push, forge
+  checks are **not** polled unless you set `AGENT_LOOP_CI_WAIT_S` to a positive
+  wait in seconds.
 
 A verify harness may print `AGENT_LOOP_VERIFY_SCOPE: full` or
 `AGENT_LOOP_VERIFY_SCOPE: scoped suites=… files=N` so the log can tell a

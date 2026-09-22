@@ -152,7 +152,7 @@
  *   judgment call) — which runs on Opus. See CMD.claudeRescope below.
  */
 
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { writeFileSync, mkdtempSync, appendFileSync, existsSync, readFileSync, unlinkSync, rmSync, renameSync, statSync, utimesSync, cpSync, watch, mkdirSync, symlinkSync, linkSync, readdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
@@ -429,14 +429,30 @@ async function selftest() {
     { idleTimeout: 400, timeout: 5_000 },
   );
   const quietIdleStart = Date.now();
+  // The child outlives the probe and burns no CPU, so the only way out is an idle kill. The
+  // budget is seconds, not milliseconds, because the watchdog now asks the OS for process-tree
+  // CPU before it fires (a Windows CIM snapshot costs ~2 s) — see maybeFire in runProc.
   const quietIdle = await runProc(
-    'node -e "setTimeout(()=>{},5000)"',
-    { idleTimeout: 400, timeout: 5_000 },
+    'node -e "setTimeout(()=>{},60000)"',
+    { idleTimeout: 400, timeout: 30_000 },
   );
   const quietIdleMs = Date.now() - quietIdleStart;
   const idleLive = noisyIdle.code === 0
-    && quietIdle.code === TIMEOUT_CODE && quietIdleMs < 1500 && /idle/i.test(quietIdle.out);
+    && quietIdle.code === TIMEOUT_CODE && quietIdleMs < 15_000 && /idle/i.test(quietIdle.out);
   if (!idleLive) console.log(`  idle-progress live probe: noisy=${noisyIdle.code} quiet=${quietIdle.code} quietMs=${quietIdleMs} out=${(quietIdle.out || '').slice(-200)}`);
+
+  // The regression this whole mechanism exists for: a child that burns CPU in total silence must
+  // survive the idle watchdog. Before the CPU check this returned 124 at the 3 s mark; grok lost
+  // 11 healthy rounds to exactly that on 2026-09-21. Deliberately a LIVE child, not a unit stub —
+  // the defect was in the wiring between the timer and the kill, which a stub cannot reach.
+  const busyStart = Date.now();
+  const busyIdle = await runProc(
+    'node -e "const t=Date.now(); while(Date.now()-t<12000){Math.sqrt(Math.random());} process.exit(0);"',
+    { idleTimeout: 3_000, timeout: 60_000 },
+  );
+  const busyMs = Date.now() - busyStart;
+  const cpuBusySurvives = busyIdle.code === 0 && busyMs >= 11_000;
+  if (!cpuBusySurvives) console.log('  cpu-busy-survives probe: failed', { code: busyIdle.code, busyMs });
 
   const linkedSeed = seedPlan({ rel: 'vendor', destExists: false, cacheExists: true, platform: 'win32', sameVolume: true });
   const copiedSeed = seedPlan({ rel: 'vendor', destExists: false, cacheExists: false, platform: 'win32', sameVolume: false });
@@ -1259,8 +1275,21 @@ async function selftest() {
     sha: getApprovedSha('selftest-attrib-new'), claude: approvalPhrase('claude'), unknown: approvalPhrase(null),
   });
 
+  // Idle must never kill a process that is still burning CPU (2026-09-21: 11 healthy rounds lost).
+  const cpuSnap = parseProcSnapshot('100 4 500\n200 100 250\n300 200 125\n999 4 7\njunk row\n', { win: true });
+  const cpuTree = treeCpuMs(cpuSnap, 100);              // 500 + 250 + 125; 999 hangs off pid 4
+  const cpuMissing = treeCpuMs(cpuSnap, 12345);         // absent root -> null, never 0
+  const cpuParse = cpuTimeToMs('1-02:03:04') === (26 * 3600 + 3 * 60 + 4) * 1000
+    && cpuTimeToMs('00:12:30') === 750_000 && cpuTimeToMs('03:04') === 184_000
+    && cpuTimeToMs('nope') === null;
+  const cpuLiveSnap = await procSnapshot();
+  const cpuSelf = cpuLiveSnap ? treeCpuMs(cpuLiveSnap, process.pid) : null;
+  const cpuLiveness = cpuTree === 875 && cpuMissing === null && cpuParse
+    && (cpuLiveSnap === null || (typeof cpuSelf === 'number' && cpuSelf >= 0));
+  if (!cpuLiveness) console.log('  cpu-liveness probe: failed', { cpuTree, cpuMissing, cpuParse, cpuSelf });
+
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
-    && cuRetryClass && quotaReset && attribution
+    && cuRetryClass && quotaReset && attribution && cpuLiveness && cpuBusySurvives
     && c && d && e && implementCap && idleCap && idleDeadline && idleLive && budgetProbe && phaseProbe && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w
     && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && rescopeBudget && chainBaseSelection && parkedReviewRouting && rollup
     && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication
@@ -2271,6 +2300,76 @@ export function agentChildEnv(base = process.env, { sandboxDir = null, primaryRe
   return env;
 }
 
+// ---------- process-tree CPU: liveness that does not depend on chattiness ----------
+// Output proves progress, but SILENCE IS NOT PROOF OF A HANG. An agent that reads files and
+// reasons for minutes prints nothing and writes nothing, yet is working: on 2026-09-21 grok was
+// killed 11 times by the idle watchdog while its own log (~/.grok/logs/unified.jsonl) showed
+// `shell.turn.inference_start` and successful `read_file`/`grep` calls under a minute before each
+// kill. That cost 11 healthy rounds, a 0-commit stub branch and ~11 idle hours. So the idle
+// deadline is now a question, not a verdict: ask the OS whether the tree burned CPU since the last
+// look. Trade-off: a process wedged in a CPU spin also burns CPU, so the idle path no longer
+// catches that one — the wall-clock ceiling does, which already was the bound for it.
+// ponytail: one OS snapshot per idle window, tree walked in JS. No sampler, no perf counters.
+const PROC_SNAPSHOT = process.platform === 'win32'
+  ? ['powershell', ['-NoProfile', '-NonInteractive', '-Command',
+      'Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,UserModeTime,KernelModeTime |'
+      + ' ForEach-Object { "{0} {1} {2}" -f $_.ProcessId, $_.ParentProcessId,'
+      + ' [int64](($_.UserModeTime + $_.KernelModeTime) / 10000) }']]
+  : ['ps', ['-A', '-o', 'pid=,ppid=,time=']];
+
+// `ps` elapsed CPU: "1-02:03:04" | "02:03:04" | "03:04" -> ms. null on anything else.
+export function cpuTimeToMs(text) {
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/.exec(String(text).trim());
+  if (!m) return null;
+  const [, d, h, min, sec] = m;
+  return Math.round((((+(d || 0) * 24) + +(h || 0)) * 3600 + +min * 60 + parseFloat(sec)) * 1000);
+}
+
+// Snapshot text -> Map pid -> { ppid, cpuMs }. An unparseable row is skipped, never fatal: a
+// partial snapshot still answers the only question we ask of it.
+export function parseProcSnapshot(text, { win = process.platform === 'win32' } = {}) {
+  const map = new Map();
+  for (const line of String(text).split(/\r?\n/)) {
+    const cols = line.trim().split(/\s+/);
+    if (cols.length < 3) continue;
+    const pid = Number(cols[0]), ppid = Number(cols[1]);
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
+    const cpuMs = win ? Number(cols[2]) : cpuTimeToMs(cols[2]);
+    if (cpuMs == null || !Number.isFinite(cpuMs)) continue;
+    map.set(pid, { ppid, cpuMs });
+  }
+  return map;
+}
+
+// Total CPU ms for `root` and every descendant. null when root is absent from the snapshot
+// (already exited, or the snapshot failed) — the caller must read null as "cannot tell", never as
+// "dead", or we are back to killing healthy agents on missing evidence.
+export function treeCpuMs(map, root) {
+  if (!map || !map.has(root)) return null;
+  const kids = new Map();
+  for (const [pid, { ppid }] of map) {
+    if (!kids.has(ppid)) kids.set(ppid, []);
+    kids.get(ppid).push(pid);
+  }
+  let sum = 0;
+  const seen = new Set(), stack = [root];
+  while (stack.length) {                       // `seen` also breaks a pid-reuse parent cycle
+    const pid = stack.pop();
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    sum += map.get(pid)?.cpuMs || 0;
+    for (const kid of kids.get(pid) || []) stack.push(kid);
+  }
+  return sum;
+}
+
+const procSnapshot = () => new Promise(resolve => {
+  const [cmd, args] = PROC_SNAPSHOT;
+  execFile(cmd, args, { timeout: 15_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+    (err, stdout) => resolve(err ? null : parseProcSnapshot(stdout)));
+});
+const treeCpuFor = async pid => treeCpuMs(await procSnapshot(), pid);
+
 function runProc(cmd, { input, timeout, idleTimeout, progressDir, label, cwd, env, agent = false, stripProviderKeys = false } = {}) {
   return new Promise(resolve => {
     const childEnv = env || (agent
@@ -2281,6 +2380,7 @@ function runProc(cmd, { input, timeout, idleTimeout, progressDir, label, cwd, en
     assignWinJob(p.pid);
     let out = '', tail = '', settled = false, timingOut = false, outputTruncated = false;
     let lastProgressAt = Date.now(), firstWriteMs = null, lastWriteMs = null, watcher = null, idleTimer = null;
+    let lastCpuMs = null, cpuUnmeasured = false;
     const OUTPUT_CAP = 8 * 1024 * 1024;
     const t0 = Date.now(), hb = heartbeatMs();
     const tick = label && hb > 0 ? setInterval(() => {
@@ -2315,6 +2415,27 @@ function runProc(cmd, { input, timeout, idleTimeout, progressDir, label, cwd, en
       });
       if (killed.ok) ACTIVE_CHILDREN.delete(p.pid);
     };
+    // The idle deadline asks a question; only the wall ceiling is a verdict. A tree that burned
+    // CPU since the last look is working, however quiet it is. Unmeasurable CPU counts as working
+    // too — on missing evidence we wait for the ceiling rather than kill a healthy agent.
+    const maybeFire = async reason => {
+      if (settled || timingOut) return;
+      if (reason !== 'idle') { fireTimeout(reason); return; }
+      const cpu = await treeCpuFor(p.pid);
+      if (settled || timingOut) return;          // the snapshot takes seconds; it may have exited
+      if (cpu == null || lastCpuMs == null || cpu > lastCpuMs) {
+        if (cpu == null && !cpuUnmeasured) {
+          cpuUnmeasured = true;
+          log(`  \u26a0 ${label || 'agent'}: cannot read process-tree CPU — idle timeout stands down, `
+            + `${mmss(timeout || 0)} wall cap still applies`);
+        }
+        lastCpuMs = cpu ?? lastCpuMs;
+        lastProgressAt = Date.now();
+        armIdle();
+        return;
+      }
+      fireTimeout(reason);
+    };
     const armIdle = () => {
       if (!idleTimeout || settled || timingOut) return;
       if (idleTimer) clearTimeout(idleTimer);
@@ -2322,7 +2443,7 @@ function runProc(cmd, { input, timeout, idleTimeout, progressDir, label, cwd, en
       const decision = progressDeadline({
         now, startedAt: t0, lastProgressAt, idleMs: idleTimeout || 0, ceilingMs: timeout || 0,
       });
-      if (decision.fire) { fireTimeout(decision.reason); return; }
+      if (decision.fire) { maybeFire(decision.reason); return; }
       const idleLeft = idleTimeout - (now - lastProgressAt);
       const ceilingLeft = timeout ? (t0 + timeout - now) : Infinity;
       const wait = Math.max(1, Math.min(idleLeft, ceilingLeft));
@@ -2330,7 +2451,7 @@ function runProc(cmd, { input, timeout, idleTimeout, progressDir, label, cwd, en
         const next = progressDeadline({
           now: Date.now(), startedAt: t0, lastProgressAt, idleMs: idleTimeout || 0, ceilingMs: timeout || 0,
         });
-        if (next.fire) fireTimeout(next.reason);
+        if (next.fire) maybeFire(next.reason);
         else armIdle();
       }, wait);
     };

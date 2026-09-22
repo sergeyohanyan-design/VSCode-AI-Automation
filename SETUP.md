@@ -226,9 +226,13 @@ engine; point it at the same environment file CI uses:
 AGENT_LOOP_VERIFY_ENV_FILE=/absolute/path/to/.env.testing
 ```
 
-Implement rounds are killed after 8 minutes of no output and no sandbox writes
-(`AGENT_LOOP_IMPLEMENT_IDLE_S`), or at the 20-minute wall-clock cap, whichever
-comes first. Set the idle cap to `0` for the old wall-clock-only behaviour.
+Implement rounds are killed after 8 minutes with no output, no sandbox writes,
+and no process-tree CPU growth (`AGENT_LOOP_IMPLEMENT_IDLE_S`), or at the
+20-minute wall-clock cap, whichever comes first. The first quiet window only
+records a CPU baseline, so a process that is truly idle is stopped on the next
+window. If CPU cannot be read, the idle kill stands down and the wall cap is
+the bound. A process spinning on CPU is not stopped by the idle cap. Set the
+idle cap to `0` for the old wall-clock-only behaviour.
 
 A task that fails review `AGENT_LOOP_MAX_ROUNDS` times (default 5) is escalated
 to a Claude re-scope. `AGENT_LOOP_MAX_RESCOPES` (default 1) is how many of those

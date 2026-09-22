@@ -106,6 +106,11 @@ const SHIPPED = [
   path.join(SRC, 'setup.js'),
   path.join(ROOT, 'agent-loop.env.example'),
   path.join(ROOT, 'package.json'),
+  // The .vsix ships these too (they are absent from .vscodeignore) and the marketplace
+  // renders them, so a board id pasted into a changelog entry is as public as one in source.
+  path.join(ROOT, 'README.md'),
+  path.join(ROOT, 'SETUP.md'),
+  path.join(ROOT, 'CHANGELOG.md'),
 ];
 const LEAK_PATTERNS = [
   ['a real ClickUp token', /\bpk_\d{6,}[_A-Z0-9]*/],
@@ -113,6 +118,13 @@ const LEAK_PATTERNS = [
   ['a machine-specific POSIX home path', /\/(?:home|Users)\/(?!Test\b)[A-Za-z0-9._-]+\//],
   ['a hardcoded ClickUp list id', /AGENT_LOOP_LIST_ID\s*(?:\|\||=)\s*['"]\d/],
   ['a ClickUp workspace or list id', /\b\d{10,}\b/],
+  // Incidents are worth writing down; the reporter's board is not. `GP32 re-scoped twice` and a
+  // verbatim `ClickUp 86eyh4bcm` fixture both shipped in src before anyone noticed. Describe the
+  // task, never name it; the placeholder id in a fixture must be numeric, like `ClickUp 123`.
+  // The second alternative reads a real id by SHAPE (letters and digits mixed), so it survives a
+  // different workspace's prefixes while leaving prose like `ClickUp workspace` alone.
+  ['a private board task reference',
+    /\bGP\d{1,3}[a-z]?\b|ClickUp\s+(?![0-9]+\b)(?![A-Za-z]+\b)[A-Za-z0-9]{7,}/],
 ];
 for (const file of SHIPPED) {
   const src = fs.readFileSync(file, 'utf8');

@@ -228,8 +228,8 @@ export function num(envName, dflt, min, max = TIMER_MAX_S) {   // default bound,
 const POLL       = num('AGENT_LOOP_POLL', 60, 5, 86_400);   // <5s hammers the ClickUp API; >1 day is nonsense
 const MAX_ROUNDS = num('AGENT_LOOP_MAX_ROUNDS', 5, 1, 100); // must be >=1 or escalation never fires
 // A successful AC auto-repair resets the round tally, so MAX_ROUNDS alone caps nothing: every
-// re-scope hands the task a fresh budget. Observed 2026-09-13/14: GP32 re-scoped twice and was
-// entitled to 3 x MAX_ROUNDS (~15) rounds; it burned ~10 and grew to 3542 diff lines. This is the
+// re-scope hands the task a fresh budget. Measured on a real chain: one task re-scoped twice and
+// was entitled to 3 x MAX_ROUNDS (~15) rounds; it burned ~10 and grew to 3542 diff lines. This is the
 // durable cap on RECOVERY ATTEMPTS, deliberately NOT reset by the auto-repair it governs.
 // 0 disables auto-repair entirely (the first churn cap parks on `stalled` for a human).
 const MAX_RESCOPES = num('AGENT_LOOP_MAX_RESCOPES', 1, 0, 20);
@@ -1075,9 +1075,10 @@ async function selftest() {
   if (!chainBaseSelection) console.log('  chain-base selection probe: failed', { chainOne, chainNone, chainDup, chainMany });
 
   // A task parked on `in review` may be handed to Claude only when the branch proves Claude wrote
-  // none of it. The grok fixture is the verbatim R3/7 commit subject that exposed this: a PARTIAL
-  // commit from a wrap-up timeout is still an attributable commit.
-  const grokPartialMsg = '[R3/7] Enforce sponsor-only restaurant categories and narration exclusion [PARTIAL — grok exited 124 (timeout)]\n\nClickUp 86eyh4bcm. Not a finished attempt.';
+  // none of it. The grok fixture keeps the shape of the real commit that exposed this — a chain
+  // prefix, a PARTIAL suffix from a wrap-up timeout, a task reference in the body — because a
+  // PARTIAL commit is still an attributable commit. Wording is neutral on purpose: this file ships.
+  const grokPartialMsg = '[T3/7] A chained task subject [PARTIAL — grok exited 124 (timeout)]\n\nClickUp 123. Not a finished attempt.';
   const grokFullMsg = 'Some task\n\nImplemented by grok via the agent-loop dispatcher (ClickUp 123).';
   const claudeFullMsg = 'Some task\n\nImplemented by claude via the agent-loop dispatcher (ClickUp 123).';
   const parkedReviewRouting =

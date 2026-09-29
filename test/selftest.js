@@ -144,7 +144,7 @@ const envKeys = new Set([
   ...(dispatcherSrc.match(/process\.env\[['"]([A-Z_][A-Z0-9_]*)/g) || []).map(s => s.match(/([A-Z_][A-Z0-9_]*)$/)[1]),
 ]);
 // Set by the dispatcher rather than read from config, or a fixture used only by --selftest.
-for (const internal of ['GIT_TERMINAL_PROMPT', 'AGENT_LOOP_SELFTEST_NUM']) envKeys.delete(internal);
+for (const internal of ['GIT_TERMINAL_PROMPT', 'AGENT_LOOP_SELFTEST_NUM', 'AGENT_LOOP_SHUTDOWN_PROBE']) envKeys.delete(internal);
 for (const key of [...envKeys].sort()) {
   assert.ok(configExample.includes(key), `agent-loop.env.example does not document ${key}`);
 }

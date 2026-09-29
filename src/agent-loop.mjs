@@ -1289,13 +1289,65 @@ async function selftest() {
     && (cpuLiveSnap === null || (typeof cpuSelf === 'number' && cpuSelf >= 0));
   if (!cpuLiveness) console.log('  cpu-liveness probe: failed', { cpuTree, cpuMissing, cpuParse, cpuSelf });
 
+  // The Windows job helper keeps the dispatcher alive after main() returns.
+  // A child must start that helper, return from main, and exit on its own.
+  let winJobShutdown = true;
+  if (process.platform !== 'win32') {
+    console.log('  win-job shutdown probe: skipped (not Windows)');
+  } else {
+    const probeTag = `al-selftest-shutdown-${process.pid}`;
+    const probeLock = join(tmpdir(), `${probeTag}.lock`);
+    const probeLog = join(tmpdir(), `${probeTag}.log`);
+    try { unlinkSync(probeLock); } catch {}
+    try { unlinkSync(probeLog); } catch {}
+    const child = spawn(process.execPath, [process.argv[1], '--selftest'], {
+      env: {
+        ...process.env,
+        AGENT_LOOP_SHUTDOWN_PROBE: '1',
+        AGENT_LOOP_LOCK: probeLock,
+        AGENT_LOOP_LOG: probeLog,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    let childOut = '';
+    child.stdout.on('data', d => { childOut += d; });
+    child.stderr.on('data', d => { childOut += d; });
+    const started = Date.now();
+    const capMs = 12_000;
+    const exited = await new Promise(resolve => {
+      const cap = setTimeout(() => resolve(null), capMs);
+      child.on('exit', code => { clearTimeout(cap); resolve(code); });
+      child.on('error', () => { clearTimeout(cap); resolve(null); });
+    });
+    const elapsed = Date.now() - started;
+    if (exited == null) {
+      try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 5000, windowsHide: true }); } catch {}
+    }
+    const keeperPid = Number((childOut.match(/shutdown-probe-keeper-pid=(\d+)/) || [])[1]);
+    let keeperDead = keeperPid > 0 && !alive(keeperPid);
+    if (keeperPid > 0 && !keeperDead) {
+      const deadline = Date.now() + 1000;
+      while (Date.now() < deadline && alive(keeperPid)) await new Promise(r => setTimeout(r, 50));
+      keeperDead = !alive(keeperPid);
+    }
+    const lockGone = !existsSync(probeLock);
+    const marker = childOut.includes('shutdown-probe-main-returned');
+    winJobShutdown = exited === 0 && elapsed < 8_000 && marker && lockGone && keeperDead;
+    if (!winJobShutdown) console.log('  win-job shutdown probe: failed', {
+      exited, elapsed, marker, lockGone, keeperDead, tail: childOut.slice(-400),
+    });
+    try { unlinkSync(probeLock); } catch {}
+    try { unlinkSync(probeLog); } catch {}
+  }
+
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
     && cuRetryClass && quotaReset && attribution && cpuLiveness && cpuBusySurvives
     && c && d && e && implementCap && idleCap && idleDeadline && idleLive && budgetProbe && phaseProbe && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w
     && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && rescopeBudget && chainBaseSelection && parkedReviewRouting && rollup
     && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication
-    && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe;
-  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution})`);
+    && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe && winJobShutdown;
+  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution} winJobShutdown=${winJobShutdown})`);
   process.exit(good ? 0 : 1);
 }
 
@@ -1498,10 +1550,25 @@ const touchLock = () => {
     return false;
   }
 };
+let lockHeartbeatTimer = null;
 function startLockHeartbeat() {
+  if (lockHeartbeatTimer) return lockHeartbeatTimer;
   const h = setInterval(touchLock, LOCK_HEARTBEAT_MS);
   if (typeof h.unref === 'function') h.unref();
+  lockHeartbeatTimer = h;
   return h;
+}
+function stopLockHeartbeat() {
+  if (!lockHeartbeatTimer) return;
+  clearInterval(lockHeartbeatTimer);
+  lockHeartbeatTimer = null;
+}
+function releaseLock() {
+  if (!allowLockRelease) {
+    log(`  ⚠ retaining lock ${LOCK_FILE}: unsafe child may still be alive`);
+    return;
+  }
+  try { if (existsSync(LOCK_FILE) && sameLockOwner(readLockRecord())) unlinkSync(LOCK_FILE); } catch {}
 }
 async function acquireLock() {
   refuseIfUnsafeMarker();
@@ -1542,14 +1609,7 @@ async function acquireLock() {
     console.error(`✖ another instance (pid ${owner?.pid || 'unknown'}) took ${LOCK_FILE} during startup — exiting to avoid two instances on one git tree.`);
     process.exit(1);
   }
-  const release = () => {
-    if (!allowLockRelease) {
-      log(`  ⚠ retaining lock ${LOCK_FILE}: unsafe child may still be alive`);
-      return;
-    }
-    try { if (existsSync(LOCK_FILE) && sameLockOwner(readLockRecord())) unlinkSync(LOCK_FILE); } catch {}
-  };
-  process.on('exit', release);
+  process.on('exit', releaseLock);
   // Await tree-kill before exit so a new instance cannot start while an orphan still edits.
   let shuttingDown = false;
   const hardStop = async (code, sig) => {
@@ -1560,7 +1620,7 @@ async function acquireLock() {
     if (kills.some(k => !k.ok)) {
       await markUnsafeChild(`${sig}: process tree kill unverified (pids: ${[...ACTIVE_CHILDREN].join(',')})`);
     }
-    release();
+    releaseLock();
     process.exit(code);
   };
   for (const sig of ['SIGINT', 'SIGTERM']) {
@@ -2114,6 +2174,8 @@ function ensureWinJobKeeper() {
       stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
     });
     winJobKeeper = { proc, ready: false };
+    proc.stdin.on('error', () => {});
+    proc.stdout.on('error', () => {});
     proc.stdout.on('data', chunk => {
       winJobKeeper.ready = true;
       winJobKeeper.buf = (winJobKeeper.buf || '') + chunk;
@@ -2128,10 +2190,54 @@ function ensureWinJobKeeper() {
       }
     });
     proc.on('exit', () => { winJobKeeper = { failed: true }; WIN_JOBS.clear(); });
+    // The helper blocks on stdin, so an open pipe pair keeps the event loop
+    // alive and the exit hook that kills it never runs. Unref both streams
+    // and the child; shutdownDispatcher still closes them explicitly.
+    try { proc.stdin.unref(); } catch {}
+    try { proc.stdout.unref(); } catch {}
+    try { proc.unref(); } catch {}
   } catch {
     winJobKeeper = { failed: true };
   }
   return winJobKeeper;
+}
+
+let dispatcherShutdownStarted = false;
+function stopWinJobKeeper() {
+  const proc = winJobKeeper?.proc;
+  if (!proc || proc.exitCode != null || proc.signalCode != null) return Promise.resolve();
+  return new Promise(resolve => {
+    let settled = false;
+    let follow = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (follow) clearTimeout(follow);
+      resolve();
+    };
+    // Referenced on purpose: the helper is unref'd, so this timer is what
+    // keeps the process alive until EOF lands or the fallback kill runs.
+    const timer = setTimeout(() => {
+      try { proc.kill(); } catch {}
+      follow = setTimeout(finish, 500);
+    }, 2000);
+    proc.once('exit', finish);
+    try {
+      if (proc.stdin && !proc.stdin.destroyed) proc.stdin.end();
+      else finish();
+    } catch {
+      try { proc.kill(); } catch {}
+      finish();
+    }
+  });
+}
+async function shutdownDispatcher() {
+  if (dispatcherShutdownStarted) return;
+  dispatcherShutdownStarted = true;
+  try { stopLockHeartbeat(); } catch {}
+  try { releaseLock(); } catch {}
+  try { await stopWinJobKeeper(); } catch {}
 }
 
 function assignWinJob(pid) {
@@ -2755,6 +2861,7 @@ const PROMPT_DIR = mkdtempSync(join(tmpdir(), 'agent-loop-'));
 // repo-relative is even reachable by accident.
 const PROBE_CWD = mkdtempSync(join(tmpdir(), 'agent-loop-probe-'));
 // Own exit hook, NOT the lock's release: --check/--selftest never take the lock and would leak.
+// The helper kill is the second line of defence behind shutdownDispatcher.
 process.on('exit', () => {
   try { rmSync(PROMPT_DIR, { recursive: true, force: true }); } catch {}
   try { rmSync(PROBE_CWD, { recursive: true, force: true }); } catch {}
@@ -4671,7 +4778,68 @@ async function pass() {
 }
 
 // ---------- drivers ----------
+function waitUntil(pred, ms) {
+  return new Promise(resolve => {
+    const start = Date.now();
+    const timer = setInterval(() => {
+      let ok = false;
+      try { ok = !!pred(); } catch { ok = false; }
+      if (ok || Date.now() - start >= ms) {
+        clearInterval(timer);
+        resolve(ok);
+      }
+    }, 20);
+  });
+}
+async function runShutdownProbe() {
+  const keeper = ensureWinJobKeeper();
+  if (!keeper?.proc || keeper.failed) {
+    console.error('shutdown probe: job keeper did not start');
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`shutdown-probe-keeper-pid=${keeper.proc.pid}`);
+  await waitUntil(() => winJobKeeper?.ready === true || winJobKeeper?.failed === true, 8000);
+  if (!winJobKeeper?.ready || winJobKeeper.failed) {
+    console.error('shutdown probe: job keeper not ready');
+    process.exitCode = 1;
+    return;
+  }
+  const sleeper = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], { stdio: 'ignore', windowsHide: true });
+  let assigned = false;
+  try {
+    assignWinJob(sleeper.pid);
+    assigned = await waitUntil(() => WIN_JOBS.has(sleeper.pid), 8000);
+  } finally {
+    await new Promise(resolve => {
+      const cap = setTimeout(() => { try { sleeper.unref(); } catch {} resolve(); }, 2000);
+      sleeper.once('exit', () => { clearTimeout(cap); resolve(); });
+      try { sleeper.kill(); } catch { clearTimeout(cap); resolve(); }
+    });
+  }
+  if (!assigned) {
+    console.error('shutdown probe: no OK reply from job keeper');
+    process.exitCode = 1;
+    return;
+  }
+  // Leave the helper blocked on stdin. Do not KILL the id just received:
+  // the helper script stores the target in $pid, which PowerShell keeps
+  // read-only, so that OK belongs to the helper and KILL would tear it down
+  // before main returns.
+  try { writeFileSync(LOCK_FILE, LOCK_OWNER.raw); }
+  catch {
+    console.error('shutdown probe: could not write lock');
+    process.exitCode = 1;
+    return;
+  }
+  startLockHeartbeat();
+  console.log('shutdown-probe-main-returned');
+}
 async function main() {
+  if (opts.selftest && process.env.AGENT_LOOP_SHUTDOWN_PROBE === '1') {
+    await runShutdownProbe();
+    return;
+  }
   if (opts.recover) {
     await recoverUnsafe();
     return;
@@ -4738,16 +4906,23 @@ async function main() {
   } while (opts.watch);
 }
 
-if (opts.selftest) await selftest();   // exits from inside; everything above is initialized by now
+// --selftest exits from inside selftest(). The shutdown probe is the exception:
+// it returns from main() so the finally below is what must let the process die.
+const shutdownProbe = opts.selftest && process.env.AGENT_LOOP_SHUTDOWN_PROBE === '1';
+if (opts.selftest && !shutdownProbe) await selftest();
 
 try {
-  await main();
+  if (!opts.selftest || shutdownProbe) await main();
 } catch (e) {
-  if (e instanceof FatalLoopError) {
+  if (shutdownProbe) {
+    console.error(`shutdown probe: ${e.message}`);
+  } else if (e instanceof FatalLoopError) {
     try { await handleFatalStop(e); }
     catch (reportError) { log(`✖ fatal-stop reporting also failed: ${reportError.message}`); }
   } else {
     log(`✖ ${e.message}`);
   }
   process.exitCode = 1;
+} finally {
+  if (!opts.selftest || shutdownProbe) await shutdownDispatcher();
 }

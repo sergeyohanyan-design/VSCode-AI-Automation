@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.5
+
+- Republish of 1.1.4. Open VSX accepted 1.1.4 and left that version inactive, so it never became installable. Deleting it would reserve the version number permanently. The Windows Safe Stop exit fix is unchanged.
+
 ## 1.1.4
 
 - On Windows, Safe Stop logged completion and left the dispatcher process running. The job-object helper was started with open stdin and stdout pipes and was only killed from the process `exit` handler, which cannot run while those pipes are still open, so the process and the helper waited on each other. The lock heartbeat kept touching the lock, and the next start was refused as already running. Returning from `main` now ends the helper (close its stdin, then kill it if it is still alive after a short wait), stops the heartbeat, and releases the lock when this process still owns it. The helper and its pipes are unref'd so they cannot keep the process alive by themselves. The `exit` handler still kills the helper if that shutdown did not run. The selftest probe `winJobShutdown` starts the helper in a child process, returns from main, and requires that child to exit within a few seconds. Other platforms skip the probe.

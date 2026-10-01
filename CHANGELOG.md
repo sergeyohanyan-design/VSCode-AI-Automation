@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.6
+
+- Codex usage. The Codex availability probe was a full `codex exec` asking for "OK": about 18,000 input tokens per probe, every pass with work on the board. It is now `codex login status`, which uses no tokens. It also no longer falls back to `AGENT_LOOP_CODEX_CMD`, which is an inference command. Quota is learned from the real review instead. A quota rejection happens before inference.
+- An unavailable Codex review (quota, or a crash mid-review) used to leave the task in review, and the next 60-second pass ran the whole review again. Codex is now benched until the reset time in its output, or for 15 minutes when there is none. The bench also applies to the rest of the same pass.
+- Codex reviews default to `model_reasoning_effort="medium"` (was `high`). One high-effort review was measured at 1.82M input tokens, with 122k in its final request, because each agentic turn re-sends the context.
+- Review prompts replace lockfile diffs (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `go.sum` and others) with a one-line stub, and tell the reviewer to read only the changed files plus what an acceptance item needs, and to run only the tests that cover the change. The empty-diff check still sees the full diff, so a lockfile-only change is not blocked as empty.
+- Selftest probes: `codexOverride` (default probe is `codex login status` even with a review override set), `benchProbe`, `lockfileFilter`.
+
 ## 1.1.5
 
 - Republish of 1.1.4. Open VSX accepted 1.1.4 and left that version inactive, so it never became installable. Deleting it would reserve the version number permanently. The Windows Safe Stop exit fix is unchanged.

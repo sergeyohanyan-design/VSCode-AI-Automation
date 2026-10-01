@@ -61,6 +61,14 @@ rule: *nothing is ever committed that was reviewed by the agent that wrote it.*
 If I have fewer than two agents, say clearly that the loop will still run and do
 useful work, but will not land anything on its own.
 
+If `codex` is on PATH, also run `codex login status`. The loop uses that exact
+command (no tokens) to decide whether Codex is up, so if it does not exit 0, tell me
+Codex will read as down. Then read `~/.codex/config.toml` — read only, do not edit
+it — and report its `model` and `service_tier`. Both apply to every Codex review. If
+`service_tier = "priority"` is set, tell me it can bill Fast mode at a higher rate
+and that I can remove the line. The loop itself runs reviews at medium reasoning and
+benches Codex after an unavailable review instead of retrying every pass.
+
 ### Phase 2 — Work out my project's settings
 
 Read this repository and propose values. Do not write anything yet — show me the

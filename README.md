@@ -150,7 +150,7 @@ what you don't need — two keys are required, everything else has a working def
 | **Your project** | base branch, repo path, project prompt contract |
 | **Verification** | repo-relative test command, sandbox location, dependency dirs to seed (coder/reviewer/verify), test env file, deliberate primary-path opt-out, parseable verify-scope line |
 | **Board vocabulary** | all 8 status names, both custom field names, the never-pick-up column |
-| **Agent commands** | the full CLI invocation for each agent — change model, flags, or binary |
+| **Agent commands** | the full CLI invocation for each agent — change model, flags, or binary; the Codex availability check (default `codex login status`, no tokens); Codex reviews default to medium reasoning |
 | **Timing** | poll interval, churn cap, per-stage timeouts, implement idle-progress cap, CLI turn budget, opt-in forge check wait, retry policy |
 | **State files** | lock, stop flag, log, handover report, churn tally, rescue manifest |
 

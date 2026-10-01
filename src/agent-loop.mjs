@@ -321,13 +321,13 @@ export function reviewerUnavailable(verdict, code, out) {
 
 // Agent command templates — override via env if a CLI's flags change. Prompt is delivered on
 // stdin for claude/codex and via --prompt-file for grok (its stdin isn't a prompt channel).
-// --skip-git-repo-check is required here (unlike CMD.codex below): the probe runs in PROBE_CWD, a
-// neutral mkdtemp dir that is deliberately NOT a git repo, and codex refuses to run at all outside
-// a trusted/git directory without this flag — verified it exits 1 with "Not inside a trusted
-// directory" otherwise, which the probe then misreads as "codex is down".
-const codexProbeCommand = () => process.env.AGENT_LOOP_CODEX_PROBE_CMD
-  || process.env.AGENT_LOOP_CODEX_CMD
-  || `codex exec --sandbox read-only --skip-git-repo-check`;
+// The Codex probe is deliberately NOT an inference call. It used to be `codex exec "Reply with
+// exactly: OK"`, which loads ~18k input tokens of Codex system prompt per probe, every pass —
+// a large share of the Codex budget spent on five-token answers. `login status` checks the CLI
+// runs and is authenticated, at zero tokens. Quota exhaustion is learned from the real review
+// instead (it is rejected before inference, so it costs nothing) and benches Codex via QUOTA_UNTIL.
+// It also no longer falls back to AGENT_LOOP_CODEX_CMD: that is an inference command by design.
+const codexProbeCommand = () => process.env.AGENT_LOOP_CODEX_PROBE_CMD || 'codex login status';
 const CMD = {
   grok:            (pf, maxTurns = MAX_TURNS) => process.env.AGENT_LOOP_GROK_CMD?.replace('{pf}', pf)
                         || `grok --prompt-file "${pf}" --always-approve --no-plan --max-turns ${maxTurns} --output-format plain`,
@@ -340,7 +340,9 @@ const CMD = {
   // workspace-write (not read-only) so Codex can actually RUN the project's tests during review —
   // read-only makes it withhold approval for lack of test evidence (churn). Scratch writes are
   // discarded by `git reset --hard HEAD` after each review round (see reviewAndResolve).
-  codex:           ()  => process.env.AGENT_LOOP_CODEX_CMD || `codex exec --sandbox workspace-write -c model_reasoning_effort="high"`,
+  // medium, not high: an agentic review re-sends its whole context every turn, so reasoning depth
+  // multiplies cost (one high-effort review was measured at 1.82M input tokens).
+  codex:           ()  => process.env.AGENT_LOOP_CODEX_CMD || `codex exec --sandbox workspace-write -c model_reasoning_effort="medium"`,
 };
 
 // ---------- audit log (gitignored) ----------
@@ -606,11 +608,16 @@ async function selftest() {
     await restoreOwnedTree('selftest cleanup', async () => ({ code: 1, out: 'simulated index lock' }));
   } catch (err) { j = err instanceof FatalLoopError; }
 
-  const oldProbeOverride = process.env.AGENT_LOOP_CODEX_CMD;
+  // The probe must never inherit the review (inference) command; only its own override replaces it.
+  const oldCodexCmd = process.env.AGENT_LOOP_CODEX_CMD, oldProbeCmd = process.env.AGENT_LOOP_CODEX_PROBE_CMD;
   process.env.AGENT_LOOP_CODEX_CMD = 'custom-codex-review';
-  const k = codexProbeCommand() === 'custom-codex-review';
-  if (oldProbeOverride === undefined) delete process.env.AGENT_LOOP_CODEX_CMD;
-  else process.env.AGENT_LOOP_CODEX_CMD = oldProbeOverride;
+  delete process.env.AGENT_LOOP_CODEX_PROBE_CMD;
+  const kDefault = codexProbeCommand() === 'codex login status';
+  process.env.AGENT_LOOP_CODEX_PROBE_CMD = 'custom-codex-probe';
+  const k = kDefault && codexProbeCommand() === 'custom-codex-probe';
+  for (const [key, old] of [['AGENT_LOOP_CODEX_CMD', oldCodexCmd], ['AGENT_LOOP_CODEX_PROBE_CMD', oldProbeCmd]]) {
+    if (old === undefined) delete process.env[key]; else process.env[key] = old;
+  }
 
   const l = canStartNewWork(() => false) && !canStartNewWork(() => true);
 
@@ -1254,6 +1261,24 @@ async function selftest() {
     && parseQuotaReset('try again in 999 days', NOW) === NOW + QUOTA_BLACKOUT_CAP_MS; // capped
   if (!quotaReset) console.log('  quota-reset parse probe: failed', { qAbs, qNear, qRel });
 
+  // A failed Codex review benches Codex: until the stated reset, else a fixed cooldown — never 0,
+  // which would re-run a full review on the very next pass.
+  const benchProbe = benchUntil('rate limit reached, try again in 25 minutes', NOW) === NOW + 25 * 60_000
+    && benchUntil('helper_sandbox_lock_failed', NOW) === NOW + AGENT_COOLDOWN_MS;
+  if (!benchProbe) console.log('  codex bench probe: failed');
+
+  // Lockfile hunks collapse to a stub; other files and the empty diff pass through unchanged.
+  const srcHunk = 'diff --git a/src/x.js b/src/x.js\n--- a/src/x.js\n+++ b/src/x.js\n@@ -1 +1 @@\n-a\n+b\n';
+  const lockHunk = 'diff --git a/web/package-lock.json b/web/package-lock.json\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-1\n+2\n';
+  const trimmed = omitLockfileDiffs(srcHunk + lockHunk);
+  const lockfileFilter = trimmed.startsWith(srcHunk)
+    && trimmed.includes('diff --git a/web/package-lock.json')
+    && trimmed.includes('(lockfile diff omitted from review: 5 lines)')
+    && !trimmed.includes('+2')
+    && omitLockfileDiffs(srcHunk) === srcHunk
+    && omitLockfileDiffs('') === '';
+  if (!lockfileFilter) console.log('  lockfile filter probe: failed', JSON.stringify(trimmed));
+
   // A Codex-down landing is reviewed by Claude, so the commit record must name the reviewer that
   // actually ran — claiming "Codex approved" turns the board into a false audit trail, and the
   // loop's whole invariant is that only reviewed work lands. Entries written as a bare SHA by an
@@ -1342,12 +1367,12 @@ async function selftest() {
   }
 
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
-    && cuRetryClass && quotaReset && attribution && cpuLiveness && cpuBusySurvives
+    && cuRetryClass && quotaReset && benchProbe && lockfileFilter && attribution && cpuLiveness && cpuBusySurvives
     && c && d && e && implementCap && idleCap && idleDeadline && idleLive && budgetProbe && phaseProbe && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w
     && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && rescopeBudget && chainBaseSelection && parkedReviewRouting && rollup
     && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication
     && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe && winJobShutdown;
-  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} attribution=${attribution} winJobShutdown=${winJobShutdown})`);
+  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} benchProbe=${benchProbe} lockfileFilter=${lockfileFilter} attribution=${attribution} winJobShutdown=${winJobShutdown})`);
   process.exit(good ? 0 : 1);
 }
 
@@ -2948,6 +2973,8 @@ text, examples of forbidden values, prior review prose, and removed diff lines a
 content. Include a path:line and the observed current value or a focused command result for every
 blocking issue. If you cannot reproduce a suspected defect from the current tree, do not report it.
 
+Keep the review focused; every file you open and every command you run is re-sent on each later turn. Read the files the diff touches, plus only those other files that an acceptance item or a suspected blocker needs. Do not survey the repository. If you run tests, run only the tests that cover the changed code, not the whole suite.
+
 Before flagging a referenced symbol, class, or function as missing an import/unresolved: the diff only shows CHANGED lines. A pre-existing import many lines above the changed hunk (or already present at the review base, never touched by this branch) will never appear in the diff text itself. Open the actual file in the sandbox and check its real top-of-file imports/use-statements before making that specific claim — do not infer "missing" purely from its absence in the diff.
 
 TASK: ${t.name}
@@ -3098,11 +3125,37 @@ const QUOTA_BLACKOUT_CAP_MS = num('AGENT_LOOP_QUOTA_BLACKOUT_CAP_H', 24, 1, 168)
 // who → epoch-ms until which it is known-down. In-memory on purpose: a restart re-probing once is
 // cheap and correct, and a stale on-disk blackout that outlives a topped-up account is not.
 const QUOTA_UNTIL = new Map();
+// When a real Codex review comes back unavailable (quota, or a crash mid-review), bench Codex instead
+// of re-running the full review on the next 60s pass. The probe can no longer see quota (it does no
+// inference), so this is now the only place a quota reset time is learned for Codex.
+// ponytail: fixed 15-min cooldown when no reset time is given; make it a setting if anyone needs it tuned.
+const AGENT_COOLDOWN_MS = 15 * 60_000;
+export function benchUntil(out, nowMs) {
+  return parseQuotaReset(out, nowMs) ?? nowMs + AGENT_COOLDOWN_MS;
+}
+// A pass probes once, then reviews a whole queue — a bench set mid-pass must stop the rest of it too.
+const codexBenched = () => (QUOTA_UNTIL.get('codex') || 0) > Date.now();
+
+// Lockfile diffs are machine-generated, often thousands of lines, and not reviewable by reading —
+// yet every line went into the review prompt and was re-sent on each agentic turn. Each one is
+// replaced with a one-line stub so the reviewer still knows the file changed.
+const LOCKFILES = new Set([
+  'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb',
+  'Cargo.lock', 'poetry.lock', 'uv.lock', 'composer.lock', 'Gemfile.lock', 'go.sum',
+]);
+export function omitLockfileDiffs(diff) {
+  return diff.split(/^(?=diff --git )/m).map(block => {
+    const first = block.split('\n', 1)[0];
+    const name = first.startsWith('diff --git ') ? first.replace(/"$/, '').split('/').pop() : '';
+    if (!LOCKFILES.has(name)) return block;
+    return `${first}\n(lockfile diff omitted from review: ${block.trimEnd().split('\n').length - 1} lines)\n`;
+  }).join('');
+}
 
 async function probe(who) {
   const until = QUOTA_UNTIL.get(who);
   if (until && Date.now() < until) {
-    log(`  probe ${who}: unavailable (quota — skipping probe until ${new Date(until).toISOString()})`);
+    log(`  probe ${who}: unavailable (quota/cooldown — skipping probe until ${new Date(until).toISOString()})`);
     return false;
   }
   if (until) QUOTA_UNTIL.delete(who); // reset time passed — probe for real again
@@ -3629,8 +3682,9 @@ async function reviewAndResolve(t, reviewer, onPass, escalateWithClaude, claudeU
     // it never touched, and the implementer correctly refuses to fix it, so the round is burned.
     const diffResult = await gAt(`diff ${co.base}...`);
     if (diffResult.code !== 0) throw new Error(`could not diff ${co.branch} against ${co.base} (git exit ${diffResult.code}: ${diffResult.out.trim().slice(0, 240)})`);
-    const diff = diffResult.out;
-    if (!diff.trim()) { await tryComment(id, `🟣 **PM** — empty diff vs \`${co.base}\` → blocked.`); await setStatus(id, S.blocked); return; }
+    // Emptiness is judged on the FULL diff: a lockfile-only change is real work, not an empty branch.
+    if (!diffResult.out.trim()) { await tryComment(id, `🟣 **PM** — empty diff vs \`${co.base}\` → blocked.`); await setStatus(id, S.blocked); return; }
+    const diff = omitLockfileDiffs(diffResult.out);
 
     const who   = reviewerLabel(reviewer);
     const emoji = reviewer === 'codex' ? '🟢' : reviewer === 'grok' ? '🔵' : '🟣';
@@ -3668,9 +3722,15 @@ async function reviewAndResolve(t, reviewer, onPass, escalateWithClaude, claudeU
     const v = extractVerdict(out);
     const unavailable = reviewerUnavailable(v, result.code, out);
     if (unavailable) {
-      await tryComment(id, `${emoji} **${who}** reviewer unavailable (crashed/quota/cooldown, exit ${result.code}) — left on **in review** to retry.\n\`\`\`\n${out.trim().slice(-600)}\n\`\`\``);
+      let retry = 'to retry';
+      if (reviewer === 'codex') {
+        const until = benchUntil(out, Date.now());
+        QUOTA_UNTIL.set('codex', until);
+        retry = `Codex benched until ${new Date(until).toISOString()}`;
+      }
+      await tryComment(id, `${emoji} **${who}** reviewer unavailable (crashed/quota/cooldown, exit ${result.code}) — left on **in review** (${retry}).\n\`\`\`\n${out.trim().slice(-600)}\n\`\`\``);
       await setStatus(id, S.review);
-      log(`  ${id} ${reviewer} unavailable (exit ${result.code}) → left in review`);
+      log(`  ${id} ${reviewer} unavailable (exit ${result.code}) → left in review (${retry})`);
       return;
     }
     const primaryVerdict = v || { verdict: 'fail', blocking_issues: [`${who} review unparseable`], notes: '' };
@@ -4714,7 +4774,7 @@ async function pass() {
       // Codex reviews whenever it is up. When it is down, Claude may stand in here exactly as it
       // does in the coding lane — but only on a diff the branch proves Claude did not write.
       let reviewer = 'codex';
-      if (!X) {
+      if (!X || codexBenched()) {
         const coders = await parkedReviewCoders(t);
         if (parkedReviewReviewer(coders) !== 'claude') {
           log(`  ⏸ ${t.id} on review left parked (Codex down; ${coders ? `coded by ${[...coders].join('+')}` : 'coder not provable from branch history'})`);
@@ -4755,7 +4815,7 @@ async function pass() {
       const G = await probe('grok');
       if (!canStartNewWork()) return;   // never open a 10-20 minute lane after a stop during Grok probe
       const coder = G ? 'grok' : 'claude';
-      if (X) await runLane(selected, { coder, reviewer: 'codex',  onPass: 'approved', escalateWithClaude: true, claudeUp: true });
+      if (X && !codexBenched()) await runLane(selected, { coder, reviewer: 'codex',  onPass: 'approved', escalateWithClaude: true, claudeUp: true });
       else   await runLane(selected, { coder, reviewer: 'claude', onPass: claudeReviewPassAction(coder), escalateWithClaude: true, claudeUp: true });
       const stalledAfterCoding = await stalledStopOutcome(true);
       if (stalledAfterCoding) return stalledAfterCoding;

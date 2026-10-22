@@ -226,9 +226,11 @@ one file, not a feature spanning three layers. Then explain to me, briefly:
   disables it. `auto` (the default) uses headless Claude for an unknown
   failure only when `claude` is on `PATH` and a startup `OK` check succeeds.
   A failed check is one log line, and the playbook still runs. That bundle includes the churn tally
-  in `~/.agent-loop-rounds.json`. A zero-commit stub branch and a
-  coder that is out of credit can be repaired only by dispatcher commands
-  (`--reset-stub`, `--bench-coder`) that re-check their own preconditions.
+  in `~/.agent-loop-rounds.json`. While the loop runs, a stub with no commits
+  beyond its chain base makes the watcher stop the loop, wait, run
+  `--reset-stub`, and start it again. A refusal stays a report with the two
+  manual steps. A coder that is out of credit is repaired only by
+  `--bench-coder`, which re-checks its own preconditions.
 - Deploy is never automated. The loop stops at `committed`.
 
 Finally, give me a short summary of everything that was configured, and anything

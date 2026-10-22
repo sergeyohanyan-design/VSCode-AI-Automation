@@ -294,10 +294,12 @@ sent to `claude -p` with no tools. The command is checked with `Reply with exact
 first; a failure is logged once and the playbook keeps running. That bundle includes the churn tally in
 `~/.agent-loop-rounds.json`. Set `AGENT_LOOP_WATCHER=off` to disable it.
 A report lands in `~/.agent-loop-watcher-report.md`. Your Safe Stop is left
-alone: the watcher does not start the loop again after you stop it. Two repairs
-go through the dispatcher, which re-checks them: a local branch with no
-commits beyond its chain base and no remote (`--reset-stub`), and a coder that is out of credit
-(`--bench-coder`, at most 24 hours).
+alone: the watcher does not start the loop again after you stop it. While the
+loop runs, a stub with no commits beyond its chain base and no remote makes
+the watcher stop the loop, wait until it exits, run `--reset-stub`, and start
+it again. A refusal stays a report with the two manual steps. A coder that is
+out of credit is benched for at most 24 hours (`--bench-coder`). Both commands
+re-check their own preconditions.
 
 ---
 

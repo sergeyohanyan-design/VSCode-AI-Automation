@@ -276,7 +276,7 @@ function effectsFor(action) {
   if (action === 'recover') { effects.recover = true; effects.start = true; }
   if (action === 'probe_coders') effects.probe = true;
   if (action === 'stop_and_report') { effects.writeStopFlag = true; effects.notify = true; }
-  if (action === 'reset_stub') { effects.resetStub = true; effects.start = true; }
+  if (action === 'reset_stub') { effects.resetStub = true; effects.clearStop = true; effects.start = true; }
   if (action === 'bench_coder') effects.bench = true;
   return effects;
 }
@@ -336,6 +336,7 @@ function emptyMemory() {
   return {
     offset: 0, fixes: {}, claudeCalls: [], probed: {}, holds: {}, notified: {},
     errors: [], quietUntil: {}, lastPass: null, keptLines: [], runId: null,
+    stubRepair: null,
   };
 }
 
@@ -354,6 +355,9 @@ function cloneMemory(memory = {}) {
     lastPass: memory.lastPass ?? null,
     keptLines: [...(memory.keptLines || [])],
     runId: memory.runId || null,
+    stubRepair: memory.stubRepair
+      ? { taskId: memory.stubRepair.taskId || null, line: memory.stubRepair.line || null }
+      : null,
   };
 }
 
@@ -371,6 +375,7 @@ function clearRunState(mem) {
   mem.holds = {};
   mem.probed = {};
   mem.runId = null;
+  mem.stubRepair = null;
 }
 
 function forgetRun(memory) {
@@ -443,6 +448,24 @@ function matchP5(lines) {
   if (!refuse.length || eligible.length < 2) return null;
   const id = (/REFUSING fresh fork of\s+([^:]+):/.exec(lineBody(refuse[0])) || [])[1] || null;
   return { line: refuse[refuse.length - 1], taskId: id ? id.trim() : null };
+}
+
+// A ref is passed to git as one argv element. `..` is the rev-range operator, so it is rejected
+// before any command is built. The charset is the extra gate.
+function safeGitRef(name) {
+  return typeof name === 'string'
+    && name.length > 0
+    && !name.includes('..')
+    && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name);
+}
+
+function parseStubLine(line) {
+  const body = lineBody(line);
+  const quoted = /branch\s+`([^`]+)`\s+already exists\s+\(\d+\s+commit\(s\)\s+beyond\s+`([^`]+)`\)/.exec(body);
+  const plain = /branch\s+(\S+)\s+already exists\s+\(\d+\s+commit\(s\)\s+beyond\s+([A-Za-z0-9][A-Za-z0-9._/-]*)/.exec(body);
+  const match = quoted || plain;
+  if (!match || !safeGitRef(match[1]) || !safeGitRef(match[2])) return null;
+  return { branch: match[1], base: match[2] };
 }
 
 function matchP7(lines) {
@@ -673,8 +696,21 @@ function matchPlaybook(facts, now) {
   }
   const p5 = matchP5(lines);
   if (p5) {
-    const stubFacts = { ...facts, taskId: p5.taskId, loopStopped: facts.loopStopped === true };
-    if (facts.phase2 && preconditions('reset_stub', stubFacts, {}).ok) {
+    if (!facts.phase2) {
+      return { row: 'P5', response: 'NOTIFY', action: 'wait', line: p5.line, taskId: p5.taskId };
+    }
+    if (facts.loopStopped !== true) {
+      if (!p5.taskId) {
+        return { row: 'P5', response: 'NOTIFY', action: 'wait', line: p5.line, taskId: p5.taskId };
+      }
+      return {
+        row: 'P5', response: 'AUTO', action: 'wait', line: p5.line, taskId: p5.taskId,
+        prepareStubReset: true,
+        humanFix: `The watcher is stopping the loop. After it exits it runs --reset-stub and starts the loop again. If that is refused: ${fixedText('P5')}`,
+      };
+    }
+    const stubFacts = { ...facts, taskId: p5.taskId, loopStopped: true };
+    if (preconditions('reset_stub', stubFacts, {}).ok) {
       return { row: 'P5', response: 'AUTO', action: 'reset_stub', line: p5.line, taskId: p5.taskId };
     }
     return { row: 'P5', response: 'NOTIFY', action: 'wait', line: p5.line, taskId: p5.taskId };
@@ -819,6 +855,45 @@ function noDecision(memory) {
   };
 }
 
+// An in-progress stub repair survives the watcher stop flag it just wrote. A user Safe Stop
+// cancels it. Returning null lets that user-stop path run.
+function continueStubRepair(facts, mem) {
+  const repair = mem.stubRepair;
+  if (!repair) return null;
+  if (isUserStop(facts.stopFlag)) {
+    mem.stubRepair = null;
+    return null;
+  }
+  const alive = facts.pidAlive === true || facts.lockPidAlive === true;
+  if (alive) {
+    if (p2Signals(facts) && identityMatches(facts)) {
+      return {
+        hit: {
+          row: 'P2', response: 'AUTO', action: 'kill_lingering',
+          line: facts.lastLogLine || null, taskId: repair.taskId || null,
+        },
+      };
+    }
+    return { quiet: true };
+  }
+  const stubFacts = { ...facts, taskId: repair.taskId, loopStopped: true };
+  mem.stubRepair = null;
+  if (facts.phase2 && preconditions('reset_stub', stubFacts, mem).ok) {
+    return {
+      hit: {
+        row: 'P5', response: 'AUTO', action: 'reset_stub',
+        line: repair.line || null, taskId: repair.taskId || null,
+      },
+    };
+  }
+  return {
+    hit: {
+      row: 'P5', response: 'NOTIFY', action: 'wait',
+      line: repair.line || null, taskId: repair.taskId || null,
+    },
+  };
+}
+
 function evaluate(facts = {}, memory = {}, claude) {
   const now = Number.isFinite(facts.now) ? facts.now : Date.now();
   const mem = cloneMemory(memory);
@@ -835,6 +910,12 @@ function evaluate(facts = {}, memory = {}, claude) {
   mem.keptLines = linesAfterLatestStart(buffer).slice(-300);
   ingestErrors(freshRun, mem, now);
   const seen = { ...facts, lines: mem.keptLines };
+
+  if (mem.stubRepair) {
+    const step = continueStubRepair(seen, mem);
+    if (step && step.quiet) return noDecision(mem);
+    if (step && step.hit) return finish(seen, mem, now, step.hit, claude);
+  }
 
   if (isUserStop(facts.stopFlag) || isWatcherStop(facts.stopFlag)) {
     if (p2Signals(seen) && identityMatches(seen)) {
@@ -965,6 +1046,13 @@ function finish(facts, mem, now, hit, claude) {
     effects.writeStopFlag = false;
     effects.recover = false;
   }
+  if (hit.prepareStubReset) {
+    effects.writeStopFlag = true;
+    effects.start = false;
+    effects.resetStub = false;
+    effects.kill = false;
+    mem.stubRepair = { taskId: hit.taskId || null, line: hit.line || null };
+  }
   if (response === 'NOTIFY' || response === 'STOP') effects.notify = true;
   if (hit.alsoNotify) effects.notify = true;
   if (hit.thenStop) {
@@ -1003,9 +1091,11 @@ function finish(facts, mem, now, hit, claude) {
     matched,
     did,
     result: refused ? `refused (${refused})` : did,
-    loopNote: hit.row === 'user-stop' || hit.row === 'watcher-stop'
-      ? 'the watcher will not restart a loop that was stopped'
-      : loopNoteFor(action, response),
+    loopNote: hit.prepareStubReset
+      ? 'the watcher stopped the loop and will reset the stub after it exits'
+      : hit.row === 'user-stop' || hit.row === 'watcher-stop'
+        ? 'the watcher will not restart a loop that was stopped'
+        : loopNoteFor(action, response),
     humanFix,
     quotaText: hit.quotaText || null,
     claudeNote,
@@ -1287,5 +1377,5 @@ module.exports = {
   parseSample, sampleScript, sampleProcess, watcherMode, pollSeconds, claudeOnPath,
   emptyMemory, forgetRun, p1Signals, p2Signals, coderWasActiveBeforeKill,
   effectiveWatcherMode, claudeSelfCheckPassed, claudeSelfCheckLog,
-  watcherShouldStop, shouldEnsureWatcher,
+  watcherShouldStop, shouldEnsureWatcher, parseStubLine,
 };

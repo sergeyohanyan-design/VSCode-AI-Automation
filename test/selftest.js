@@ -84,6 +84,29 @@ assert.equal(child.AGENT_LOOP_ROUNDS, path.join(HOME, '.agent-loop-rounds.json')
 assert.equal(child.CLICKUP_TOKEN, undefined);
 assert.equal(child.GITHUB_TOKEN, undefined);
 
+const stubQuoted = 'REFUSING fresh fork of 123: branch `agent-loop/task-a-123` already exists (0 commit(s) beyond `main`)';
+const stubCalls = [];
+const stubGit = t.readStubGit('repo', stubQuoted, args => {
+  stubCalls.push(args);
+  if (args[0] === 'rev-list') return { code: 0, out: '0\n' };
+  return { code: 0, out: 'refs/remotes/origin/agent-loop/task-a-123\n' };
+});
+assert.equal(stubGit.commits, 0);
+assert.equal(stubGit.hasRemote, true);
+assert.equal(stubGit.base, 'main');
+assert.deepEqual(stubCalls[0], ['rev-list', '--count', 'main..agent-loop/task-a-123']);
+assert.equal(t.readStubGit('repo', 'branch `../secret` already exists (0 commit(s) beyond `main`)', () => {
+  throw new Error('git must not run');
+}), null);
+const stubPlain = t.readStubGit(
+  'repo',
+  'REFUSING fresh fork of 123: branch agent-loop/task-a-123 already exists (0 commit(s) beyond main)',
+  args => (args[0] === 'rev-list' ? { code: 0, out: '4\n' } : { code: 0, out: '' }),
+);
+assert.equal(stubPlain.commits, 4);
+assert.equal(stubPlain.hasRemote, false);
+assert.equal(t.readStubGit('repo', stubQuoted, () => ({ code: 1, out: '' })), null);
+
 const loaded = t.loadStateEnv(
   { AGENT_LOOP_ENV: 'test.env' },
   'C:\\Users\\Test',
@@ -686,6 +709,85 @@ async function watcherChecks() {
   });
   assert.equal(p5auto.action, 'reset_stub');
   assert.equal(p5auto.taskId, '123');
+  assert.equal(p5auto.effects.clearStop, true);
+  const p5running = decide({
+    lines: [stub, elig, elig],
+    phase2: true,
+  });
+  assert.equal(p5running.effects.writeStopFlag, true);
+  assert.equal(p5running.effects.resetStub, false);
+  assert.equal(p5running.effects.start, false);
+  assert.equal(p5running.memory.stubRepair && p5running.memory.stubRepair.taskId, '123');
+  const watcherFlag = 'requested 2026-10-22T12:00:00.000Z by the watcher\n';
+  const p5wait = decide({
+    lines: [],
+    phase2: true,
+    stopFlag: watcherFlag,
+  }, p5running.memory);
+  assert.notEqual(p5wait.row, 'watcher-stop');
+  assert.equal(p5wait.logLine, null);
+  assert.equal(p5wait.effects.resetStub, false);
+  assert.equal(p5wait.effects.start, false);
+  assert.equal(p5wait.memory.stubRepair && p5wait.memory.stubRepair.taskId, '123');
+  const p5done = decide({
+    lines: [],
+    phase2: true,
+    stopFlag: watcherFlag,
+    pidAlive: false,
+    lockExists: false,
+    lockPidAlive: false,
+    loopStopped: true,
+    stubCommits: 0,
+    stubRemote: false,
+  }, p5wait.memory);
+  assert.equal(p5done.action, 'reset_stub');
+  assert.equal(p5done.effects.start, true);
+  assert.equal(p5done.effects.clearStop, true);
+  assert.equal(p5done.memory.stubRepair, null);
+  const p5refuse = decide({
+    lines: [],
+    phase2: true,
+    stopFlag: watcherFlag,
+    pidAlive: false,
+    lockExists: false,
+    lockPidAlive: false,
+    loopStopped: true,
+    stubCommits: 2,
+    stubRemote: false,
+  }, p5running.memory);
+  assert.equal(p5refuse.response, 'NOTIFY');
+  assert.equal(p5refuse.effects.resetStub, false);
+  assert.equal(p5refuse.effects.start, false);
+  assert.ok(p5refuse.report.includes('git rev-list --count'));
+  assert.equal(p5refuse.memory.stubRepair, null);
+  const p5user = decide({
+    lines: [],
+    stopFlag: 'requested 2026-10-22T12:00:00.000Z from the Agent Loop button\n',
+  }, p5running.memory);
+  assert.equal(p5user.row, 'user-stop');
+  assert.equal(p5user.effects.start, false);
+  assert.equal(p5user.effects.kill, false);
+  assert.equal(p5user.memory.stubRepair, null);
+  const p5linger = decide({
+    lines: [],
+    phase2: true,
+    stopFlag: watcherFlag,
+    heartbeat: { pid: 10, nonce: 'abc', stage: 'stopped', pass: 1 },
+    stoppedForMs: 6 * 60 * 1000,
+    cpuRatio: 0,
+    children: [],
+    lastLogLine: stamp(NOW, 'Safe Stop complete'),
+  }, p5running.memory);
+  assert.equal(p5linger.row, 'P2');
+  assert.equal(p5linger.effects.kill, true);
+  assert.equal(p5linger.effects.start, false);
+  assert.equal(p5linger.memory.stubRepair && p5linger.memory.stubRepair.taskId, '123');
+  const repaired = watcher.emptyMemory();
+  repaired.stubRepair = { taskId: '123', line: 'x' };
+  repaired.fixes = { 'P3:kept': [NOW] };
+  const droppedRepair = watcher.forgetRun(repaired);
+  assert.equal(droppedRepair.stubRepair, null);
+  assert.deepEqual(droppedRepair.fixes, { 'P3:kept': [NOW] });
   assert.notEqual(decide({ lines: [stub, elig] }).row, 'P5');
   assert.notEqual(decide({
     lines: [

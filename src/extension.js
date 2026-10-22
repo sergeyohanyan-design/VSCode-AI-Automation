@@ -505,6 +505,16 @@ async function collectFacts(env, paths, mode) {
     if (Number.isFinite(at)) stoppedForMs = now - at;
   }
   const seeds = String(env.AGENT_LOOP_VERIFY_SEED_DIRS || '').split(',').map(s => s.trim()).filter(Boolean);
+  let stubCommits;
+  let stubRemote;
+  const repair = watcherMemory && watcherMemory.stubRepair;
+  if (repair && repair.line && !pidAliveNow && !lockPidAlive) {
+    const stubGit = readStubGit(repoRoot(), repair.line);
+    if (stubGit) {
+      stubCommits = stubGit.commits;
+      stubRemote = stubGit.hasRemote;
+    }
+  }
   return {
     now,
     env,
@@ -539,11 +549,39 @@ async function collectFacts(env, paths, mode) {
     pass: heartbeat && heartbeat.pass,
     loopStopped: !pidAliveNow && !lockPidAlive,
     rounds: readRoundsTally(paths.rounds),
+    stubCommits,
+    stubRemote,
   };
 }
 
 function lineBodySafe(line) {
   return String(line).replace(/^\s*\[[^\]]*\]\s*/, '');
+}
+
+// Read-only. Called only after the loop has exited and a stub repair is waiting.
+// A missing repo, an unsafe ref, or any git failure returns null so the repair is reported
+// instead of deleting a branch the watcher could not measure.
+function readStubGit(repo, line, run) {
+  const parsed = watcher.parseStubLine(line);
+  if (!repo || !parsed) return null;
+  const git = run || (args => {
+    const result = cp.spawnSync('git', args, {
+      cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 15000, shell: false,
+    });
+    return { code: result.status, out: result.stdout || '' };
+  });
+  try {
+    const count = git(['rev-list', '--count', `${parsed.base}..${parsed.branch}`]);
+    if (!count || count.code !== 0) return null;
+    const commits = Number(String(count.out).trim());
+    if (!Number.isInteger(commits) || commits < 0) return null;
+    const refs = git(['for-each-ref', '--format=%(refname)', 'refs/remotes']);
+    if (!refs || refs.code !== 0) return null;
+    const hasRemote = String(refs.out).split(/\r?\n/).some(ref => ref.endsWith(`/${parsed.branch}`));
+    return { commits, hasRemote, branch: parsed.branch, base: parsed.base };
+  } catch {
+    return null;
+  }
 }
 
 function numberSetting(value, fallback) {
@@ -728,5 +766,6 @@ module.exports = {
   __test: {
     loadStateEnv, resolveStatePaths, parseLockRecord, lockLooksLive, pickTerminal,
     DISPATCHER, CONFIG_EXAMPLE, openConfig, childEnv, STATE_ENV_KEYS, readRoundsTally,
+    readStubGit,
   },
 };

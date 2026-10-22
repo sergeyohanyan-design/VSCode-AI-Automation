@@ -9,6 +9,7 @@
 - Exit 0 with a JSON verdict is a successful Claude call. The word "quota" in that verdict is not an auth failure. Auth or quota text counts only on stderr of a non-zero exit.
 - A kill that misses the process group tries the pid itself. The lock and a new start happen only after the pid is gone, polled for up to 10 seconds. If it is still alive, the watcher writes the stop report and leaves the lock in place.
 - `--reset-stub` counts commits beyond the task's chain base, the same base a fresh fork uses. A stub cut from a predecessor branch is no longer refused for the commits that live only on that predecessor.
+- While the loop is running, a zero-commit stub makes the watcher stop the loop, wait until it exits, run `--reset-stub`, and start it again. The commit count is read with read-only git after the loop has exited. If the reset is refused, the report keeps the two manual steps. A Safe Stop you requested aborts that repair and does not start the loop.
 
 ## 1.2.1
 

@@ -61,10 +61,12 @@ Beyond the routing, the parts that matter in practice:
   frozen loop or a repeated unknown error is sent to headless Claude with no tools, and only an
   allowlisted action can run. Before the first call it checks that the command
   replies `OK`; if not, the playbook runs and the watcher log says why. That
-  bundle includes the churn tally in `~/.agent-loop-rounds.json`. A zero-commit
-  stub branch, counted beyond its chain base, can be deleted, and a coder
-  that is out of credit can be benched, only through a dispatcher command that
-  re-checks the preconditions. Your own Safe Stop is never restarted. The report is
+  bundle includes the churn tally in `~/.agent-loop-rounds.json`. While the
+  loop runs, a zero-commit stub counted beyond its chain base makes the watcher
+  stop the loop, wait until it exits, run `--reset-stub`, and start it again.
+  A refusal stays a report with the two manual steps. A coder that is out of
+  credit can be benched only through a dispatcher command that re-checks the
+  preconditions. Your own Safe Stop is never restarted. The report is
   `~/.agent-loop-watcher-report.md`.
 - **Reviewers only ever see the task's own work.** The review diff is taken from the merge base
   with the base branch, never from its moving tip. A hotfix landing on `main` while a task is open

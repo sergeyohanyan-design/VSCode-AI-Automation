@@ -295,8 +295,8 @@ first; a failure is logged once and the playbook keeps running. That bundle incl
 `~/.agent-loop-rounds.json`. Set `AGENT_LOOP_WATCHER=off` to disable it.
 A report lands in `~/.agent-loop-watcher-report.md`. Your Safe Stop is left
 alone: the watcher does not start the loop again after you stop it. Two repairs
-go through the dispatcher, which re-checks them: a zero-commit local branch
-with no remote (`--reset-stub`), and a coder that is out of credit
+go through the dispatcher, which re-checks them: a local branch with no
+commits beyond its chain base and no remote (`--reset-stub`), and a coder that is out of credit
 (`--bench-coder`, at most 24 hours).
 
 ---

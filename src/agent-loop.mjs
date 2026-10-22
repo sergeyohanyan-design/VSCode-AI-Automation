@@ -1454,7 +1454,27 @@ async function selftest() {
     const expiredPath = join(stubDir, 'old-bench.json');
     writeFileSync(expiredPath, JSON.stringify({ coder: 'codex', until: now - 1000 }));
     const old = readBenchFile(expiredPath, now);
-    stubAndBenchProbe = plan0.ok === true && zero.commits === 0 && zero.hasRemote === false
+    const pred = 'agent-loop/task-pred-122';
+    const chainedStub = 'agent-loop/task-stub-124';
+    if ((await run(`checkout -q main`)).code !== 0) throw new Error('checkout main for chain');
+    if ((await run(`branch ${pred}`)).code !== 0) throw new Error('pred branch');
+    if ((await run(`checkout -q ${pred}`)).code !== 0) throw new Error('checkout pred');
+    writeFileSync(join(stubDir, 'pred.txt'), 'pred\n');
+    if ((await run('add -A')).code !== 0 || (await run('commit -qm pred')).code !== 0) throw new Error('pred commit');
+    if ((await run(`branch ${chainedStub}`)).code !== 0) throw new Error('chained stub');
+    if ((await run('checkout -q main')).code !== 0) throw new Error('back to main');
+    const beyondPred = await stubBranchFacts(stubDir, chainedStub, pred);
+    const beyondMain = await stubBranchFacts(stubDir, chainedStub, 'main');
+    const measured = await measureStub(stubDir, chainedStub, { base: pred }, 'main');
+    const chainStub = beyondPred.commits === 0
+      && beyondMain.commits >= 1
+      && measured.base === pred
+      && measured.facts.commits === 0
+      && resetStubPlan({ ...measured.facts, lockAlive: false }).ok === true
+      && resetStubPlan({ ...beyondMain, lockAlive: false }).ok === false
+      && String(resetStubCli).includes('measureStub')
+      && String(resetStubCli).includes('resolveChainBase');
+    stubAndBenchProbe = plan0.ok === true && zero.commits === 0 && zero.hasRemote === false && chainStub
       && deleted.code === 0 && gone.code !== 0
       && plan1.ok === false && one.commits === 1 && still.code === 0
       && remoteFacts.hasRemote === true
@@ -5123,6 +5143,13 @@ async function stubBranchFacts(repo, branch, base) {
   const hasRemote = refs.code === 0 && refs.out.split(/\r?\n/).some(ref => ref.endsWith(`/${branch}`));
   return { branchExists: true, commits, hasRemote };
 }
+function stubResetBase(chain, configuredBase) {
+  return (chain && chain.base) || configuredBase;
+}
+async function measureStub(repo, branch, chain, configuredBase) {
+  const base = stubResetBase(chain, configuredBase);
+  return { base, facts: await stubBranchFacts(repo, branch, base) };
+}
 function lockPidAlive() {
   try {
     const record = parseLockRecord(readFileSync(LOCK_FILE, 'utf8'));
@@ -5154,14 +5181,15 @@ async function resetStubCli() {
     return;
   }
   const branch = (await findExistingBranchOf(t)) || branchOf(t);
-  const facts = await stubBranchFacts(REPO, branch, BASE);
+  const measured = await measureStub(REPO, branch, await resolveChainBase(t), BASE);
+  const facts = measured.facts;
   const plan = resetStubPlan({ ...facts, lockAlive: lockPidAlive() });
   if (!plan.ok) {
     console.error(`✖ --reset-stub refused: ${plan.reason}`);
     process.exitCode = 1;
     return;
   }
-  const ok = await confirmYes(`Delete local branch ${branch} (0 commits beyond ${BASE}) and set ${id} to ready? Type y and Enter.`);
+  const ok = await confirmYes(`Delete local branch ${branch} (0 commits beyond ${measured.base}) and set ${id} to ready? Type y and Enter.`);
   if (!ok) { console.error('aborted'); process.exitCode = 1; return; }
   const del = await git(`branch -d ${branch}`);
   if (del.code !== 0) {

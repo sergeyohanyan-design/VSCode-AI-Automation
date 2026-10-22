@@ -62,7 +62,7 @@ Beyond the routing, the parts that matter in practice:
   allowlisted action can run. Before the first call it checks that the command
   replies `OK`; if not, the playbook runs and the watcher log says why. That
   bundle includes the churn tally in `~/.agent-loop-rounds.json`. A zero-commit
-  stub branch can be deleted, and a coder
+  stub branch, counted beyond its chain base, can be deleted, and a coder
   that is out of credit can be benched, only through a dispatcher command that
   re-checks the preconditions. Your own Safe Stop is never restarted. The report is
   `~/.agent-loop-watcher-report.md`.

@@ -405,7 +405,7 @@ function wedge(over = {}) {
 }
 
 async function watcherChecks() {
-  assert.equal(watcher.PHASE2, false);
+  assert.equal(watcher.PHASE2, true);
   assert.equal(watcher.stageLimitMs('implement', {}), 1_800_000);
   assert.equal(watcher.stageLimitMs('review', {}), 1_200_000);
   assert.equal(watcher.stageLimitMs('adjudicate', {}), 1_200_000);

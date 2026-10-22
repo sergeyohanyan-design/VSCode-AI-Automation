@@ -164,13 +164,16 @@ import { fileURLToPath } from 'node:url';
 
 // ---------- args ----------
 const argv = process.argv.slice(2);
-const opts = { watch: false, selftest: false, check: false, recover: false, yes: false, taskId: null };
-for (const a of argv) {
+const opts = { watch: false, selftest: false, check: false, recover: false, yes: false, taskId: null, resetStub: null, benchCoder: null };
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
   if (a === '--watch') opts.watch = true;
   else if (a === '--selftest') opts.selftest = true;
   else if (a === '--check') opts.check = true;
   else if (a === '--recover') opts.recover = true;
   else if (a === '--yes') opts.yes = true;
+  else if (a === '--reset-stub') opts.resetStub = argv[++i] || '';
+  else if (a === '--bench-coder') opts.benchCoder = argv[++i] || '';
   else if (!a.startsWith('--')) opts.taskId = a;
 }
 
@@ -1406,13 +1409,75 @@ async function selftest() {
     try { rmSync(hbDir, { recursive: true, force: true }); } catch {}
   }
 
+  // Stub reset refuses a branch that has commits or a remote. Bench file caps at 24h
+  // and an expired file is removed. Temp repo only — never the working tree.
+  let stubAndBenchProbe = false;
+  const stubDir = mkdtempSync(join(tmpdir(), 'al-stub-'));
+  try {
+    const run = args => gitAt(stubDir, args);
+    const init = await run('init -q -b main');
+    if (init.code !== 0) throw new Error(init.out);
+    for (const cfg of [
+      ['user.email', 'selftest@example.invalid'],
+      ['user.name', 'selftest'],
+      ['commit.gpgsign', 'false'],
+    ]) {
+      const cfgResult = await run(`config ${cfg[0]} ${cfg[1]}`);
+      if (cfgResult.code !== 0) throw new Error(cfgResult.out);
+    }
+    writeFileSync(join(stubDir, 'README.md'), 'base\n');
+    if ((await run('add -A')).code !== 0) throw new Error('git add failed');
+    if ((await run('commit -qm base')).code !== 0) throw new Error('git commit failed');
+    const branch = 'agent-loop/task-a-123';
+    if ((await run(`branch ${branch}`)).code !== 0) throw new Error('git branch failed');
+    const zero = await stubBranchFacts(stubDir, branch, 'main');
+    const plan0 = resetStubPlan({ ...zero, lockAlive: false });
+    const deleted = await run(`branch -d ${branch}`);
+    const gone = await run(`show-ref --verify --quiet refs/heads/${branch}`);
+    if ((await run(`branch ${branch}`)).code !== 0) throw new Error('recreate failed');
+    if ((await run(`checkout -q ${branch}`)).code !== 0) throw new Error('checkout failed');
+    writeFileSync(join(stubDir, 'extra.txt'), 'x\n');
+    if ((await run('add -A')).code !== 0 || (await run('commit -qm extra')).code !== 0) throw new Error('extra commit failed');
+    if ((await run('checkout -q main')).code !== 0) throw new Error('checkout main failed');
+    const one = await stubBranchFacts(stubDir, branch, 'main');
+    const plan1 = resetStubPlan({ ...one, lockAlive: false });
+    const still = await run(`show-ref --verify --quiet refs/heads/${branch}`);
+    if ((await run(`update-ref refs/remotes/origin/${branch} HEAD`)).code !== 0) throw new Error('remote ref failed');
+    const remoteFacts = await stubBranchFacts(stubDir, branch, 'main');
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    const written = benchFilePlan('grok', now);
+    const capped = benchFilePlan('claude', now, now + 2 * day);
+    const benchPath = join(stubDir, 'bench.json');
+    writeFileSync(benchPath, JSON.stringify(written.record));
+    const loaded = readBenchFile(benchPath, now);
+    const expiredPath = join(stubDir, 'old-bench.json');
+    writeFileSync(expiredPath, JSON.stringify({ coder: 'codex', until: now - 1000 }));
+    const old = readBenchFile(expiredPath, now);
+    stubAndBenchProbe = plan0.ok === true && zero.commits === 0 && zero.hasRemote === false
+      && deleted.code === 0 && gone.code !== 0
+      && plan1.ok === false && one.commits === 1 && still.code === 0
+      && remoteFacts.hasRemote === true
+      && resetStubPlan({ ...remoteFacts, lockAlive: false }).ok === false
+      && resetStubPlan({ branchExists: true, commits: 0, hasRemote: false, lockAlive: true }).ok === false
+      && written.ok === true && loaded && loaded.coder === 'grok' && loaded.until === now + day
+      && capped.ok === true && capped.record.until === now + day
+      && benchFilePlan('nope', now).ok === false
+      && old && old.expired === true && !existsSync(expiredPath);
+    if (!stubAndBenchProbe) console.log('  stub/bench probe: failed', { zero, plan0, plan1, one, remoteFacts, loaded, old, deleted: deleted.code, gone: gone.code, still: still.code });
+  } catch (e) {
+    console.log('  stub/bench probe: failed', e.message);
+  } finally {
+    try { rmSync(stubDir, { recursive: true, force: true }); } catch {}
+  }
+
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
     && cuRetryClass && quotaReset && benchProbe && lockfileFilter && attribution && cpuLiveness && cpuBusySurvives
     && c && d && e && implementCap && idleCap && idleDeadline && idleLive && budgetProbe && phaseProbe && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w
     && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && rescopeBudget && chainBaseSelection && parkedReviewRouting && rollup
     && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication
-    && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe && winJobShutdown && heartbeatFileProbe;
-  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} benchProbe=${benchProbe} lockfileFilter=${lockfileFilter} attribution=${attribution} winJobShutdown=${winJobShutdown} heartbeatFile=${heartbeatFileProbe})`);
+    && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe && winJobShutdown && heartbeatFileProbe && stubAndBenchProbe;
+  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} benchProbe=${benchProbe} lockfileFilter=${lockfileFilter} attribution=${attribution} winJobShutdown=${winJobShutdown} heartbeatFile=${heartbeatFileProbe} stubBench=${stubAndBenchProbe})`);
   process.exit(good ? 0 : 1);
 }
 
@@ -3222,8 +3287,10 @@ export function parseQuotaReset(out, nowMs) {
   return Math.min(t, nowMs + QUOTA_BLACKOUT_CAP_MS);
 }
 const QUOTA_BLACKOUT_CAP_MS = num('AGENT_LOOP_QUOTA_BLACKOUT_CAP_H', 24, 1, 168) * 3600_000;
-// who → epoch-ms until which it is known-down. In-memory on purpose: a restart re-probing once is
-// cheap and correct, and a stale on-disk blackout that outlives a topped-up account is not.
+// who → epoch-ms until which it is known-down. Quota is in-memory on purpose: a restart
+// re-probing once is cheap, and a stale quota blackout that outlives a topped-up account is not.
+// A credit bench is the exception. It is a file the watcher asked for, capped at 24h, and deleted
+// when that time ends.
 const QUOTA_UNTIL = new Map();
 // When a real Codex review comes back unavailable (quota, or a crash mid-review), bench Codex instead
 // of re-running the full review on the next 60s pass. The probe can no longer see quota (it does no
@@ -3232,6 +3299,45 @@ const QUOTA_UNTIL = new Map();
 const AGENT_COOLDOWN_MS = 15 * 60_000;
 export function benchUntil(out, nowMs) {
   return parseQuotaReset(out, nowMs) ?? nowMs + AGENT_COOLDOWN_MS;
+}
+// A coder the watcher benched for being out of credit. The file is the hand-off:
+// the watcher never holds the board token, and this process re-checks the name
+// and the 24h cap before treating that coder as down.
+const BENCH_CAP_MS = 24 * 60 * 60 * 1000;
+const BENCH_FILE = () => process.env.AGENT_LOOP_BENCH_FILE || join(homedir(), '.agent-loop-bench.json');
+export function benchFilePlan(name, nowMs, requestedUntilMs) {
+  const coder = String(name || '').toLowerCase();
+  if (!['claude', 'codex', 'grok'].includes(coder)) return { ok: false, reason: 'coder must be claude, codex, or grok' };
+  const cap = nowMs + BENCH_CAP_MS;
+  const until = Number.isFinite(requestedUntilMs) ? Math.min(requestedUntilMs, cap) : cap;
+  if (!(until > nowMs)) return { ok: false, reason: 'bench time is already past' };
+  return { ok: true, record: { coder, until } };
+}
+export function readBenchFile(file, nowMs) {
+  let body;
+  try { body = JSON.parse(readFileSync(file, 'utf8')); }
+  catch { return null; }
+  if (!body || !['claude', 'codex', 'grok'].includes(body.coder) || !Number.isFinite(body.until)) return null;
+  if (body.until <= nowMs) {
+    try { unlinkSync(file); } catch { /* already gone */ }
+    return { expired: true, coder: body.coder };
+  }
+  return { coder: body.coder, until: body.until };
+}
+function applyBenchFromDisk(now = Date.now()) {
+  const applied = readBenchFile(BENCH_FILE(), now);
+  if (!applied || applied.expired) return;
+  const current = QUOTA_UNTIL.get(applied.coder) || 0;
+  if (applied.until > current) QUOTA_UNTIL.set(applied.coder, applied.until);
+}
+// Delete a local stub only when it cannot be someone else's work: the loop is
+// stopped, the branch is 0 commits ahead of its fork base, and no remote has a copy.
+export function resetStubPlan({ branchExists, commits, hasRemote, lockAlive }) {
+  if (lockAlive) return { ok: false, reason: 'the loop is still running' };
+  if (!branchExists) return { ok: false, reason: 'branch does not exist' };
+  if (hasRemote) return { ok: false, reason: 'branch has a remote copy' };
+  if (commits !== 0) return { ok: false, reason: 'branch has commits beyond its base' };
+  return { ok: true };
 }
 // A pass probes once, then reviews a whole queue — a bench set mid-pass must stop the rest of it too.
 const codexBenched = () => (QUOTA_UNTIL.get('codex') || 0) > Date.now();
@@ -4813,6 +4919,7 @@ async function pass() {
   }
 
   // --- sense availability (top of the flowchart) ---
+  applyBenchFromDisk();
   const C = await probe('claude');
   if (!canStartNewWork()) return;   // the flag may have arrived during the probe
 
@@ -5007,6 +5114,79 @@ async function runShutdownProbe() {
   startLockHeartbeat();
   console.log('shutdown-probe-main-returned');
 }
+async function stubBranchFacts(repo, branch, base) {
+  const exists = await gitAt(repo, `show-ref --verify --quiet refs/heads/${branch}`);
+  if (exists.code !== 0) return { branchExists: false, commits: null, hasRemote: false };
+  const count = await gitAt(repo, `rev-list --count ${base}..${branch}`);
+  const commits = count.code === 0 ? Number(count.out.trim()) : null;
+  const refs = await gitAt(repo, 'for-each-ref --format=%(refname) refs/remotes');
+  const hasRemote = refs.code === 0 && refs.out.split(/\r?\n/).some(ref => ref.endsWith(`/${branch}`));
+  return { branchExists: true, commits, hasRemote };
+}
+function lockPidAlive() {
+  try {
+    const record = parseLockRecord(readFileSync(LOCK_FILE, 'utf8'));
+    return !!(record && alive(record.pid));
+  } catch { return false; }
+}
+async function confirmYes(prompt) {
+  if (opts.yes) return true;
+  console.log(prompt);
+  const answer = await new Promise(resolve => {
+    process.stdin.setEncoding('utf8');
+    process.stdin.once('data', d => resolve(String(d).trim()));
+    process.stdin.resume();
+  });
+  try { process.stdin.pause(); } catch { /* already paused */ }
+  return answer.toLowerCase() === 'y';
+}
+async function resetStubCli() {
+  const id = String(opts.resetStub || '');
+  if (!/^\w[\w-]*$/.test(id)) {
+    console.error('✖ --reset-stub refused: task id must be one token');
+    process.exitCode = 1;
+    return;
+  }
+  const t = await getTask(id);
+  if (!t || !t.id) {
+    console.error(`✖ --reset-stub refused: task ${id} was not found`);
+    process.exitCode = 1;
+    return;
+  }
+  const branch = (await findExistingBranchOf(t)) || branchOf(t);
+  const facts = await stubBranchFacts(REPO, branch, BASE);
+  const plan = resetStubPlan({ ...facts, lockAlive: lockPidAlive() });
+  if (!plan.ok) {
+    console.error(`✖ --reset-stub refused: ${plan.reason}`);
+    process.exitCode = 1;
+    return;
+  }
+  const ok = await confirmYes(`Delete local branch ${branch} (0 commits beyond ${BASE}) and set ${id} to ready? Type y and Enter.`);
+  if (!ok) { console.error('aborted'); process.exitCode = 1; return; }
+  const del = await git(`branch -d ${branch}`);
+  if (del.code !== 0) {
+    console.error(`✖ git branch -d failed: ${String(del.out || '').slice(0, 300)}`);
+    process.exitCode = 1;
+    return;
+  }
+  await setStatus(id, S.ready);
+  log(`reset stub ${branch} for ${id} → ready`);
+}
+async function benchCoderCli() {
+  const plan = benchFilePlan(opts.benchCoder, Date.now());
+  if (!plan.ok) {
+    console.error(`✖ --bench-coder refused: ${plan.reason}`);
+    process.exitCode = 1;
+    return;
+  }
+  const ok = await confirmYes(`Bench ${plan.record.coder} until ${new Date(plan.record.until).toISOString()}? Type y and Enter.`);
+  if (!ok) { console.error('aborted'); process.exitCode = 1; return; }
+  const file = BENCH_FILE();
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(plan.record));
+  renameSync(tmp, file);
+  log(`benched ${plan.record.coder} until ${new Date(plan.record.until).toISOString()}`);
+}
 async function main() {
   if (opts.selftest && process.env.AGENT_LOOP_SHUTDOWN_PROBE === '1') {
     await runShutdownProbe();
@@ -5014,6 +5194,14 @@ async function main() {
   }
   if (opts.recover) {
     await recoverUnsafe();
+    return;
+  }
+  if (opts.resetStub != null) {
+    await resetStubCli();
+    return;
+  }
+  if (opts.benchCoder != null) {
+    await benchCoderCli();
     return;
   }
   if (opts.check) {
@@ -5044,6 +5232,7 @@ async function main() {
       // Forcing a task by ID skips the queues, so it must repeat their eligibility check itself.
       const refusal = pickupRefusalReason(t) || await asyncPickupRefusal(t);
       if (refusal) { log(`🛑 refusing ${opts.taskId} "${t.name}": ${refusal}`); return; }
+      applyBenchFromDisk();
       const C = await probe('claude'), X = await probe('codex'), G = await probe('grok');
       const coder = G ? 'grok' : 'claude';
       if (C && X)      await runLane(t, { coder, reviewer: 'codex',  onPass: 'approved', escalateWithClaude: true,  claudeUp: true });

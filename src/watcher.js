@@ -9,7 +9,7 @@ const os = require('os');
 const path = require('path');
 const cp = require('child_process');
 
-const PHASE2 = false;
+const PHASE2 = true;
 const CLAUDE_TIMEOUT_MS = 120_000;
 const FIX_WINDOW_MS = 6 * 60 * 60 * 1000;
 const CALL_WINDOW_MS = 60 * 60 * 1000;

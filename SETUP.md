@@ -292,7 +292,10 @@ While the loop runs, the extension also runs a watcher. It reads
 failure is repaired, waited out, reported, or stopped. An unknown one can be
 sent to `claude -p` with no tools. Set `AGENT_LOOP_WATCHER=off` to disable it.
 A report lands in `~/.agent-loop-watcher-report.md`. Your Safe Stop is left
-alone: the watcher does not start the loop again after you stop it.
+alone: the watcher does not start the loop again after you stop it. Two repairs
+go through the dispatcher, which re-checks them: a zero-commit local branch
+with no remote (`--reset-stub`), and a coder that is out of credit
+(`--bench-coder`, at most 24 hours).
 
 ---
 

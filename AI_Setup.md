@@ -224,7 +224,9 @@ one file, not a feature spanning three layers. Then explain to me, briefly:
   lines, and writes `~/.agent-loop-watcher-report.md` when it reports or stops
   something. It does not restart a loop you stopped. `AGENT_LOOP_WATCHER=off`
   disables it. `auto` (the default) uses headless Claude for an unknown
-  failure only when `claude` is on `PATH`.
+  failure only when `claude` is on `PATH`. A zero-commit stub branch and a
+  coder that is out of credit can be repaired only by dispatcher commands
+  (`--reset-stub`, `--bench-coder`) that re-check their own preconditions.
 - Deploy is never automated. The loop stops at `committed`.
 
 Finally, give me a short summary of everything that was configured, and anything

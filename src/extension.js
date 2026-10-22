@@ -233,6 +233,8 @@ function start() {
   activeTerminal = term;
   term.show();
   term.sendText(`node "${DISPATCHER}" --watch`);
+  watcherMemory = watcher.forgetRun(watcherMemory || watcher.emptyMemory());
+  try { watcher.saveMemory(paths.watcherState, watcherMemory); } catch { /* state file is best-effort */ }
   armWatcher();
   render();
 }

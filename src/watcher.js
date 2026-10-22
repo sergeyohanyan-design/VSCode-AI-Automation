@@ -335,7 +335,7 @@ function claudeOnPath() {
 function emptyMemory() {
   return {
     offset: 0, fixes: {}, claudeCalls: [], probed: {}, holds: {}, notified: {},
-    errors: [], quietUntil: {}, lastPass: null, keptLines: [],
+    errors: [], quietUntil: {}, lastPass: null, keptLines: [], runId: null,
   };
 }
 
@@ -353,7 +353,39 @@ function cloneMemory(memory = {}) {
     quietUntil: { ...(memory.quietUntil || {}) },
     lastPass: memory.lastPass ?? null,
     keptLines: [...(memory.keptLines || [])],
+    runId: memory.runId || null,
   };
+}
+
+function runNonce(facts) {
+  if (facts.lock && facts.lock.nonce) return String(facts.lock.nonce);
+  if (facts.heartbeat && facts.heartbeat.nonce) return String(facts.heartbeat.nonce);
+  return null;
+}
+
+function clearRunState(mem) {
+  mem.keptLines = [];
+  mem.errors = [];
+  mem.notified = {};
+  mem.quietUntil = {};
+  mem.holds = {};
+  mem.probed = {};
+  mem.runId = null;
+}
+
+function forgetRun(memory) {
+  const mem = cloneMemory(memory || {});
+  clearRunState(mem);
+  return mem;
+}
+
+function linesAfterLatestStart(lines) {
+  const all = lines || [];
+  let start = -1;
+  for (let i = 0; i < all.length; i++) {
+    if (/=== start:/.test(lineBody(all[i]))) start = i;
+  }
+  return start < 0 ? all.slice() : all.slice(start);
 }
 
 function recentTimes(times, now, windowMs) {
@@ -460,6 +492,15 @@ function matchP9(lines, now) {
     return { line: hit.line, quota: hit.quota, response: 'STOP', action: 'stop_and_report', escalated: true };
   }
   return { line: hit.line, quota: hit.quota, response: 'WAIT', action: 'wait', waitMin: 10 };
+}
+
+function matchP11(lines, now) {
+  const hits = findBodies(lines, /STOP: no coder available/).filter(line => {
+    const at = lineAt(line);
+    return at != null && now - at >= 0 && now - at <= REPEAT_WINDOW_MS;
+  });
+  if (hits.length < REPEAT_N) return null;
+  return hits[hits.length - 1];
 }
 
 function matchP12(lines) {
@@ -655,9 +696,8 @@ function matchPlaybook(facts, now) {
   if (parked && facts.pidAlive && Number.isFinite(facts.heartbeatAgeMs) && facts.heartbeatAgeMs < 2 * 60 * 1000 && shellOnly(facts.children)) {
     return { row: 'P10', response: 'WAIT', action: 'wait', line: findBodies(lines, /left parked/).pop(), waitMin: 60 };
   }
-  if (findBodies(lines, /STOP: no coder available/).length >= 3) {
-    return { row: 'P11', response: 'STOP', action: 'probe_coders', line: findBodies(lines, /STOP: no coder available/).pop(), probeMode: 'probe', thenStop: true };
-  }
+  const p11 = matchP11(lines, now);
+  if (p11) return { row: 'P11', response: 'STOP', action: 'probe_coders', line: p11, probeMode: 'probe', thenStop: true };
   const p12 = matchP12(lines);
   if (p12) return { row: 'P12', response: 'STOP', action: 'probe_coders', line: p12, probeMode: 'review', thenStop: true };
   const p13 = matchP13(lines, facts);
@@ -783,9 +823,15 @@ function evaluate(facts = {}, memory = {}, claude) {
   if (Number.isFinite(facts.nextOffset)) mem.offset = facts.nextOffset;
   if (mem.lastPass != null && facts.pass != null && facts.pass < mem.lastPass) mem.holds = {};
   if (facts.pass != null) mem.lastPass = facts.pass;
+  const nonce = runNonce(facts);
+  if (facts.runReset || (nonce && mem.runId && mem.runId !== nonce)) clearRunState(mem);
+  if (nonce) mem.runId = nonce;
   const freshLines = facts.lines || [];
-  ingestErrors(freshLines, mem, now);
-  mem.keptLines = [...(mem.keptLines || []), ...freshLines].slice(-300);
+  const buffer = [...(mem.keptLines || []), ...freshLines];
+  if (buffer.some(line => /=== start:/.test(lineBody(line)))) mem.errors = [];
+  const freshRun = linesAfterLatestStart(freshLines);
+  mem.keptLines = linesAfterLatestStart(buffer).slice(-300);
+  ingestErrors(freshRun, mem, now);
   const seen = { ...facts, lines: mem.keptLines };
 
   if (isUserStop(facts.stopFlag) || isWatcherStop(facts.stopFlag)) {
@@ -1191,7 +1237,7 @@ module.exports = {
   parseClaudeVerdict, evaluate, quoteCmdArg, killProcessTree, spawnCaptured, runClaude,
   probePlan, runProbes, loadMemory, saveMemory, appendLog, writeReport, newestMtime,
   parseSample, sampleScript, sampleProcess, watcherMode, pollSeconds, claudeOnPath,
-  emptyMemory, p1Signals, p2Signals, coderWasActiveBeforeKill,
+  emptyMemory, forgetRun, p1Signals, p2Signals, coderWasActiveBeforeKill,
   effectiveWatcherMode, claudeSelfCheckPassed, claudeSelfCheckLog,
   watcherShouldStop, shouldEnsureWatcher,
 };

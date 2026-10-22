@@ -4,6 +4,7 @@
 
 - The headless Claude command no longer passes `--bare`. That flag accepts only an API key, so a subscription login failed every call with "Not logged in". When the watcher starts in full mode it sends `Reply with exactly: OK`. A failure is one watcher-log line, and only the playbook runs after that.
 - The watcher no longer stops on the tick that follows Start, before the dispatcher has written its lock. It stays up until it has seen that run, or for 2 minutes with no dispatcher. The 3-second poller starts it again when the loop is running and the timer is gone.
+- A new dispatcher run (a new lock nonce, or Start) drops the previous run's log lines, error counts, quiet windows, holds, and probe marks. Fix counters stay for their 6 hour limit. Playbook rows match only lines after the latest `=== start:` line. `STOP: no coder available` counts only when it happens 3 times within 15 minutes.
 
 ## 1.2.1
 

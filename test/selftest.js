@@ -837,6 +837,45 @@ async function watcherChecks() {
   assert.equal(p11.effects.writeStopFlag, true);
   assert.equal(p11.effects.start, false);
   assert.notEqual(decide({ lines: [stopCoder, stopCoder] }).row, 'P11');
+  const runT0 = Date.parse('2026-10-22T10:00:00Z');
+  const oldStops = [0, 70, 140].map(s => stamp(runT0 + s * 1000, 'STOP: no coder available'));
+  const run1 = decide({
+    now: runT0 + 200 * 1000,
+    lines: oldStops,
+    heartbeat: { pid: 4242, nonce: 'n1', stage: 'idle', pass: 1 },
+    lock: { pid: 4242, nonce: 'n1' },
+    pass: 1,
+  });
+  assert.equal(run1.row, 'P11');
+  const run1Fixes = { 'P3:kept': [runT0] };
+  run1.memory.fixes = run1Fixes;
+  const restarted = decide({
+    now: runT0 + 260 * 1000,
+    lines: [stamp(runT0 + 260 * 1000, 'probe grok: available')],
+    heartbeat: { pid: 5151, nonce: 'n2', stage: 'idle', pass: 1 },
+    lock: { pid: 5151, nonce: 'n2' },
+    pass: 1,
+  }, run1.memory);
+  assert.notEqual(restarted.row, 'P11');
+  assert.equal(restarted.effects.writeStopFlag, false);
+  assert.deepEqual(restarted.memory.fixes, run1Fixes);
+  assert.notEqual(decide({
+    now: runT0 + 300 * 1000,
+    lines: [
+      ...oldStops,
+      stamp(runT0 + 250 * 1000, '=== start: watch=true task=(universal)'),
+      stamp(runT0 + 260 * 1000, 'probe grok: available'),
+    ],
+  }).row, 'P11');
+  assert.notEqual(decide({ now: runT0 + 20 * 60 * 1000, lines: oldStops }).row, 'P11');
+  const keptFixes = watcher.emptyMemory();
+  keptFixes.fixes = { 'P3:kept': [NOW] };
+  keptFixes.keptLines = ['old'];
+  keptFixes.errors = [{ sig: 'a', at: NOW }];
+  const forgotten = watcher.forgetRun(keptFixes);
+  assert.deepEqual(forgotten.fixes, { 'P3:kept': [NOW] });
+  assert.deepEqual(forgotten.keptLines, []);
+  assert.deepEqual(forgotten.errors, []);
 
   const t0 = NOW;
   const p12 = decide({

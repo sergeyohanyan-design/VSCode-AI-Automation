@@ -424,7 +424,9 @@ function clockOnDay(raw, baseMs) {
   if (/pm/i.test(m[3])) hour += 12;
   const day = new Date(baseMs);
   day.setHours(hour, Number(m[2]), 0, 0);
-  return day.getTime();
+  const when = day.getTime();
+  if (when < baseMs) return when + 24 * 60 * 60 * 1000;
+  return when;
 }
 
 function resumedAfter(lines, fromMs) {

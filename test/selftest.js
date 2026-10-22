@@ -781,6 +781,14 @@ async function watcherChecks() {
   });
   assert.equal(shortWait.row, 'P9');
   assert.equal(shortWait.response, 'WAIT');
+  const midnightSeen = new Date(2026, 9, 22, 23, 0, 0).getTime();
+  const midnight = decide({
+    now: midnightSeen + 5 * 60 * 1000,
+    lines: [stamp(midnightSeen, 'probe codex: unavailable (quota/rate-limit): try again at 2:31 AM')],
+  });
+  assert.equal(midnight.row, 'P9');
+  assert.equal(midnight.response, 'WAIT');
+  assert.equal(midnight.action, 'wait');
   const escalated = decide({
     now: atLocal(10, 20),
     lines: [stamp(atLocal(9, 30), 'claude unavailable: try again at 10:00 AM')],

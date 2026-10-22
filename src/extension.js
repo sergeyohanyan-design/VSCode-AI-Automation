@@ -233,7 +233,7 @@ function start() {
   activeTerminal = term;
   term.show();
   term.sendText(`node "${DISPATCHER}" --watch`);
-  ensureWatcher();
+  armWatcher();
   render();
 }
 
@@ -350,6 +350,14 @@ let watcherClaudeOnPath = null;
 let playbookLogged = false;
 let claudeSelfCheck = null;
 let claudeCheckPromise = null;
+let watcherArmedAt = 0;
+let watcherSawDispatcher = false;
+
+function armWatcher() {
+  watcherArmedAt = Date.now();
+  watcherSawDispatcher = false;
+  ensureWatcher();
+}
 
 function watcherSettings() {
   const env = loadStateEnv();
@@ -383,6 +391,7 @@ function ensureWatcher() {
   const { env, paths, configured } = watcherSettings();
   if (configured === 'off') return;
   if (configured === 'full') ensureClaudeSelfCheck(env, paths);
+  if (!watcherArmedAt) watcherArmedAt = Date.now();
   if (watcherTimer) return;
   if (configured === 'playbook' && !playbookLogged) {
     try { watcher.appendLog(paths.watcherLog, 'watcher playbook only; claude is not on PATH'); } catch { /* log is best-effort */ }
@@ -623,8 +632,12 @@ async function watcherTick() {
     watcherMemory = decision.memory;
     try { watcher.saveMemory(paths.watcherState, watcherMemory); } catch { /* state file is best-effort */ }
     await applyDecision(decision, paths);
-    const still = facts.pidAlive || facts.lockExists || facts.unsafe || watcher.isUserStop(facts.stopFlag) || watcher.isWatcherStop(facts.stopFlag);
-    if (!still) stopWatcher();
+    const present = !!(facts.pidAlive || facts.lockExists || facts.unsafe
+      || watcher.isUserStop(facts.stopFlag) || watcher.isWatcherStop(facts.stopFlag));
+    if (present) watcherSawDispatcher = true;
+    if (watcher.watcherShouldStop({
+      present, sawDispatcher: watcherSawDispatcher, armedAt: watcherArmedAt, now: Date.now(),
+    })) stopWatcher();
   } catch (e) {
     try {
       const paths = statePaths();
@@ -679,6 +692,7 @@ function activate(context) {
   let wasRunning = isRunning();
   poller = setInterval(() => {
     const running = isRunning();
+    if (watcher.shouldEnsureWatcher(running, !!watcherTimer)) ensureWatcher();
     if (running !== wasRunning) {
       if (!running) vscode.window.showInformationMessage(
         `Agent Loop: stopped. Handover report: ${reportFile()}`, 'Open report')

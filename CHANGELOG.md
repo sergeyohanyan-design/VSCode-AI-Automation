@@ -3,6 +3,7 @@
 ## 1.2.2
 
 - The headless Claude command no longer passes `--bare`. That flag accepts only an API key, so a subscription login failed every call with "Not logged in". When the watcher starts in full mode it sends `Reply with exactly: OK`. A failure is one watcher-log line, and only the playbook runs after that.
+- The watcher no longer stops on the tick that follows Start, before the dispatcher has written its lock. It stays up until it has seen that run, or for 2 minutes with no dispatcher. The 3-second poller starts it again when the loop is running and the timer is gone.
 
 ## 1.2.1
 

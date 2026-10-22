@@ -23,6 +23,7 @@ const CONFIDENCE_MIN = 0.7;
 const MAX_WAIT_MIN = 60;
 const BOARD_HOLD_PASSES = 3;
 const CPU_WEDGE = 0.7;
+const WATCHER_START_GRACE_MS = 2 * 60 * 1000;
 
 // Checked against `claude --help` and a real `claude -p` run. --bare forces API-key auth and
 // rejects a subscription login ("Not logged in"), so it is not used. --tools "" disables every
@@ -301,6 +302,20 @@ function claudeSelfCheckPassed(result) {
 function claudeSelfCheckLog(result) {
   const reason = redact(result && result.reason ? result.reason : 'did not reply OK');
   return `claude self-check failed (${reason}); watcher playbook only`;
+}
+
+// The first tick after Start has no lock yet. Keep the timer until this run has been seen,
+// or until the grace period ends with no dispatcher.
+function watcherShouldStop(state = {}) {
+  if (state.present) return false;
+  const grace = Number.isFinite(state.graceMs) ? state.graceMs : WATCHER_START_GRACE_MS;
+  const elapsed = Number(state.now) - Number(state.armedAt);
+  if (!state.sawDispatcher && Number.isFinite(elapsed) && elapsed < grace) return false;
+  return true;
+}
+
+function shouldEnsureWatcher(running, hasTimer) {
+  return running === true && !hasTimer;
 }
 
 function pollSeconds(value) {
@@ -1169,6 +1184,7 @@ async function sampleProcess(pid, opts = {}) {
 
 module.exports = {
   PHASE2, ACTIONS, DEFAULT_CLAUDE_ARGS, DEFAULT_CLAUDE_CMD, CLAUDE_TIMEOUT_MS,
+  WATCHER_START_GRACE_MS,
   REPEAT_N, REPEAT_WINDOW_MS, CONFIDENCE_MIN, P7_WINDOW_MS,
   redact, readNewLog, normalizeSignature, stageLimitMs, tailText, creditExhausted,
   isUserStop, isWatcherStop, watcherStopText, identityMatches, preconditions,
@@ -1177,4 +1193,5 @@ module.exports = {
   parseSample, sampleScript, sampleProcess, watcherMode, pollSeconds, claudeOnPath,
   emptyMemory, p1Signals, p2Signals, coderWasActiveBeforeKill,
   effectiveWatcherMode, claudeSelfCheckPassed, claudeSelfCheckLog,
+  watcherShouldStop, shouldEnsureWatcher,
 };

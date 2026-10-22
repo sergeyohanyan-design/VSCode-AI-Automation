@@ -447,6 +447,22 @@ async function watcherChecks() {
   assert.equal(watcher.claudeSelfCheckPassed({ ok: false, text: 'OK\n' }), false);
   assert.equal(watcher.claudeSelfCheckPassed({ ok: true, text: 'Not logged in' }), false);
   assert.ok(watcher.claudeSelfCheckLog({ ok: false, reason: 'Not logged in' }).includes('playbook only'));
+  assert.equal(watcher.WATCHER_START_GRACE_MS, 2 * 60 * 1000);
+  assert.equal(watcher.watcherShouldStop({
+    present: false, sawDispatcher: false, armedAt: 0, now: 1500,
+  }), false);
+  assert.equal(watcher.watcherShouldStop({
+    present: false, sawDispatcher: false, armedAt: 0, now: watcher.WATCHER_START_GRACE_MS + 1,
+  }), true);
+  assert.equal(watcher.watcherShouldStop({
+    present: true, sawDispatcher: false, armedAt: 0, now: 999999,
+  }), false);
+  assert.equal(watcher.watcherShouldStop({
+    present: false, sawDispatcher: true, armedAt: 0, now: 1500,
+  }), true);
+  assert.equal(watcher.shouldEnsureWatcher(true, false), true);
+  assert.equal(watcher.shouldEnsureWatcher(true, true), false);
+  assert.equal(watcher.shouldEnsureWatcher(false, false), false);
   assert.equal(watcher.REPEAT_N, 3);
   assert.equal(watcher.REPEAT_WINDOW_MS, 15 * 60 * 1000);
 

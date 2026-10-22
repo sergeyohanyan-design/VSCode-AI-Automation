@@ -106,6 +106,19 @@ const stubPlain = t.readStubGit(
 assert.equal(stubPlain.commits, 4);
 assert.equal(stubPlain.hasRemote, false);
 assert.equal(t.readStubGit('repo', stubQuoted, () => ({ code: 1, out: '' })), null);
+const countCalls = [];
+const counted = t.countBranchCommits('repo', '123', args => {
+  countCalls.push(args);
+  if (args[0] === 'for-each-ref') return { code: 0, out: 'main\nagent-loop/task-a-123\nagent-loop/task-b-1234\n' };
+  return { code: 0, out: '7\n' };
+});
+assert.equal(counted, 7);
+assert.deepEqual(countCalls[1], ['rev-list', '--count', 'agent-loop/task-a-123']);
+assert.equal(t.countBranchCommits('repo', '999', () => ({ code: 0, out: 'main\n' })), null);
+assert.equal(t.countBranchCommits('repo', '../x', () => { throw new Error('git must not run'); }), null);
+assert.equal(t.countBranchCommits('repo', '123', args => (
+  args[0] === 'for-each-ref' ? { code: 0, out: 'evil..name-123\n' } : { code: 0, out: '1\n' }
+)), null);
 
 const loaded = t.loadStateEnv(
   { AGENT_LOOP_ENV: 'test.env' },
@@ -1028,6 +1041,17 @@ async function watcherChecks() {
   assert.equal(decide({ lines: cycle, commitCounts: { '123': [4, 4, 4] } }).row, 'P13');
   assert.notEqual(decide({ lines: cycle, commitCounts: { '123': [4, 5, 6] } }).row, 'P13');
   assert.notEqual(decide({ lines: cycle }).row, 'P13');
+  const sampled = watcher.appendCommitCounts(null, cycle, () => 4);
+  assert.deepEqual(sampled, { '123': [4, 4, 4] });
+  assert.equal(decide({ lines: cycle, commitCounts: sampled }).row, 'P13');
+  assert.deepEqual(watcher.appendCommitCounts(sampled, [stamp(t0, '123 verify FAILED (round 4/3)')], () => 4)['123'], [4, 4, 4, 4]);
+  assert.deepEqual(watcher.appendCommitCounts({}, cycle, () => null), {});
+  const countedMem = watcher.emptyMemory();
+  countedMem.commitCounts = { '123': [4, 4, 4] };
+  countedMem.fixes = { 'P3:kept': [NOW] };
+  const droppedCounts = watcher.forgetRun(countedMem);
+  assert.deepEqual(droppedCounts.commitCounts, {});
+  assert.deepEqual(droppedCounts.fixes, { 'P3:kept': [NOW] });
 
   const turns = [
     stamp(t0, '123 grok exited 1 (max turns reached) → round 1/5'),
@@ -1115,10 +1139,24 @@ async function watcherChecks() {
     ...wedge(),
     stopFlag: 'requested 2026-10-22T11:00:00.000Z from the Agent Loop button\n',
   });
-  assert.equal(userStop.row, 'user-stop');
+  assert.equal(userStop.row, 'P1');
+  assert.equal(userStop.effects.kill, true);
   assert.equal(userStop.effects.start, false);
-  assert.equal(userStop.effects.kill, false);
+  assert.equal(userStop.effects.clearStop, false);
+  assert.equal(userStop.effects.clearLock, true);
   assert.equal(userStop.effects.writeStopFlag, false);
+  const userQuiet = decide({
+    stopFlag: 'requested 2026-10-22T11:00:00.000Z from the Agent Loop button\n',
+  });
+  assert.equal(userQuiet.row, 'user-stop');
+  assert.equal(userQuiet.effects.kill, false);
+  assert.equal(userQuiet.effects.start, false);
+  const watcherWedge = decide({
+    ...wedge(),
+    stopFlag: watcher.watcherStopText(new Date(NOW)),
+  });
+  assert.equal(watcherWedge.row, 'watcher-stop');
+  assert.equal(watcherWedge.effects.kill, false);
   const watcherStop = decide({
     stopFlag: watcher.watcherStopText(new Date(NOW)),
     lockExists: true,

@@ -336,7 +336,7 @@ function emptyMemory() {
   return {
     offset: 0, fixes: {}, claudeCalls: [], probed: {}, holds: {}, notified: {},
     errors: [], quietUntil: {}, lastPass: null, keptLines: [], runId: null,
-    stubRepair: null,
+    stubRepair: null, commitCounts: {},
   };
 }
 
@@ -358,6 +358,7 @@ function cloneMemory(memory = {}) {
     stubRepair: memory.stubRepair
       ? { taskId: memory.stubRepair.taskId || null, line: memory.stubRepair.line || null }
       : null,
+    commitCounts: copyCommitCounts(memory.commitCounts),
   };
 }
 
@@ -376,6 +377,7 @@ function clearRunState(mem) {
   mem.probed = {};
   mem.runId = null;
   mem.stubRepair = null;
+  mem.commitCounts = {};
 }
 
 function forgetRun(memory) {
@@ -395,6 +397,32 @@ function linesAfterLatestStart(lines) {
 
 function recentTimes(times, now, windowMs) {
   return (times || []).filter(t => now - t < windowMs);
+}
+
+function copyCommitCounts(existing) {
+  const source = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+  const out = {};
+  for (const [id, samples] of Object.entries(source)) {
+    if (!Array.isArray(samples)) continue;
+    out[id] = samples.filter(n => Number.isInteger(n) && n >= 0);
+  }
+  return out;
+}
+
+// One sample per new verify-failure line. A missing count is not a sample, so a
+// branch the watcher cannot see does not look flat.
+function appendCommitCounts(existing, lines, readCount) {
+  const out = copyCommitCounts(existing);
+  for (const line of lines || []) {
+    if (!/\bverify FAILED\b/.test(lineBody(line))) continue;
+    const id = taskOf(lineBody(line));
+    if (!id || typeof readCount !== 'function') continue;
+    const n = readCount(id);
+    if (!Number.isInteger(n) || n < 0) continue;
+    if (!out[id]) out[id] = [];
+    out[id].push(n);
+  }
+  return out;
 }
 
 function taskOf(body) {
@@ -901,20 +929,33 @@ function evaluate(facts = {}, memory = {}, claude) {
   if (mem.lastPass != null && facts.pass != null && facts.pass < mem.lastPass) mem.holds = {};
   if (facts.pass != null) mem.lastPass = facts.pass;
   const nonce = runNonce(facts);
-  if (facts.runReset || (nonce && mem.runId && mem.runId !== nonce)) clearRunState(mem);
+  const resetRun = !!(facts.runReset || (nonce && mem.runId && mem.runId !== nonce));
+  if (resetRun) clearRunState(mem);
   if (nonce) mem.runId = nonce;
   const freshLines = facts.lines || [];
   const buffer = [...(mem.keptLines || []), ...freshLines];
   if (buffer.some(line => /=== start:/.test(lineBody(line)))) mem.errors = [];
   const freshRun = linesAfterLatestStart(freshLines);
   mem.keptLines = linesAfterLatestStart(buffer).slice(-300);
+  if (resetRun && typeof facts.readCommitCount === 'function') {
+    mem.commitCounts = appendCommitCounts({}, freshRun, facts.readCommitCount);
+  } else if (!resetRun && facts.commitCounts && typeof facts.commitCounts === 'object') {
+    mem.commitCounts = copyCommitCounts(facts.commitCounts);
+  }
   ingestErrors(freshRun, mem, now);
-  const seen = { ...facts, lines: mem.keptLines };
+  const seen = { ...facts, lines: mem.keptLines, commitCounts: mem.commitCounts };
 
   if (mem.stubRepair) {
     const step = continueStubRepair(seen, mem);
     if (step && step.quiet) return noDecision(mem);
     if (step && step.hit) return finish(seen, mem, now, step.hit, claude);
+  }
+
+  if (isUserStop(facts.stopFlag) && p1Signals(seen) && identityMatches(seen)) {
+    return finish(seen, mem, now, {
+      row: 'P1', response: 'AUTO', action: 'kill_and_recover', line: null, noRestart: true,
+      humanFix: 'The watcher kills the stuck process and deletes the lock. Your Safe Stop stays in place, so the loop is not started again.',
+    }, claude);
   }
 
   if (isUserStop(facts.stopFlag) || isWatcherStop(facts.stopFlag)) {
@@ -1053,6 +1094,11 @@ function finish(facts, mem, now, hit, claude) {
     effects.kill = false;
     mem.stubRepair = { taskId: hit.taskId || null, line: hit.line || null };
   }
+  if (hit.noRestart) {
+    effects.start = false;
+    effects.clearStop = false;
+    effects.writeStopFlag = false;
+  }
   if (response === 'NOTIFY' || response === 'STOP') effects.notify = true;
   if (hit.alsoNotify) effects.notify = true;
   if (hit.thenStop) {
@@ -1091,9 +1137,11 @@ function finish(facts, mem, now, hit, claude) {
     matched,
     did,
     result: refused ? `refused (${refused})` : did,
-    loopNote: hit.prepareStubReset
-      ? 'the watcher stopped the loop and will reset the stub after it exits'
-      : hit.row === 'user-stop' || hit.row === 'watcher-stop'
+    loopNote: hit.noRestart
+      ? 'the watcher killed the stuck process and left your Safe Stop in place'
+      : hit.prepareStubReset
+        ? 'the watcher stopped the loop and will reset the stub after it exits'
+        : hit.row === 'user-stop' || hit.row === 'watcher-stop'
         ? 'the watcher will not restart a loop that was stopped'
         : loopNoteFor(action, response),
     humanFix,
@@ -1377,5 +1425,5 @@ module.exports = {
   parseSample, sampleScript, sampleProcess, watcherMode, pollSeconds, claudeOnPath,
   emptyMemory, forgetRun, p1Signals, p2Signals, coderWasActiveBeforeKill,
   effectiveWatcherMode, claudeSelfCheckPassed, claudeSelfCheckLog,
-  watcherShouldStop, shouldEnsureWatcher, parseStubLine,
+  watcherShouldStop, shouldEnsureWatcher, parseStubLine, safeGitRef, appendCommitCounts,
 };

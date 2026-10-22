@@ -294,7 +294,8 @@ sent to `claude -p` with no tools. The command is checked with `Reply with exact
 first; a failure is logged once and the playbook keeps running. That bundle includes the churn tally in
 `~/.agent-loop-rounds.json`. Set `AGENT_LOOP_WATCHER=off` to disable it.
 A report lands in `~/.agent-loop-watcher-report.md`. Your Safe Stop is left
-alone: the watcher does not start the loop again after you stop it. While the
+alone: the watcher does not start the loop again after you stop it. A process
+that keeps spinning is killed, and the loop stays stopped. While the
 loop runs, a stub with no commits beyond its chain base and no remote makes
 the watcher stop the loop, wait until it exits, run `--reset-stub`, and start
 it again. A refusal stays a report with the two manual steps. A coder that is

@@ -66,7 +66,8 @@ Beyond the routing, the parts that matter in practice:
   stop the loop, wait until it exits, run `--reset-stub`, and start it again.
   A refusal stays a report with the two manual steps. A coder that is out of
   credit can be benched only through a dispatcher command that re-checks the
-  preconditions. Your own Safe Stop is never restarted. The report is
+  preconditions. Your own Safe Stop is never restarted. A process that keeps
+  spinning after that stop is killed, and the loop stays stopped. The report is
   `~/.agent-loop-watcher-report.md`.
 - **Reviewers only ever see the task's own work.** The review diff is taken from the merge base
   with the base branch, never from its moving tip. A hotfix landing on `main` while a task is open

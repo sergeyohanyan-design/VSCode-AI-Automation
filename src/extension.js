@@ -507,6 +507,11 @@ async function collectFacts(env, paths, mode) {
   const seeds = String(env.AGENT_LOOP_VERIFY_SEED_DIRS || '').split(',').map(s => s.trim()).filter(Boolean);
   let stubCommits;
   let stubRemote;
+  const commitCounts = watcher.appendCommitCounts(
+    watcherMemory && watcherMemory.commitCounts,
+    chunk.lines,
+    id => countBranchCommits(repoRoot(), id),
+  );
   const repair = watcherMemory && watcherMemory.stubRepair;
   if (repair && repair.line && !pidAliveNow && !lockPidAlive) {
     const stubGit = readStubGit(repoRoot(), repair.line);
@@ -551,6 +556,8 @@ async function collectFacts(env, paths, mode) {
     rounds: readRoundsTally(paths.rounds),
     stubCommits,
     stubRemote,
+    commitCounts,
+    readCommitCount: id => countBranchCommits(repoRoot(), id),
   };
 }
 
@@ -561,6 +568,29 @@ function lineBodySafe(line) {
 // Read-only. Called only after the loop has exited and a stub repair is waiting.
 // A missing repo, an unsafe ref, or any git failure returns null so the repair is reported
 // instead of deleting a branch the watcher could not measure.
+function countBranchCommits(repo, taskId, run) {
+  if (!repo || typeof taskId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(taskId)) return null;
+  const git = run || (args => {
+    const result = cp.spawnSync('git', args, {
+      cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 15000, shell: false,
+    });
+    return { code: result.status, out: result.stdout || '' };
+  });
+  try {
+    const refs = git(['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+    if (!refs || refs.code !== 0) return null;
+    const branch = String(refs.out).split(/\r?\n/).map(name => name.trim()).filter(Boolean)
+      .find(name => name.endsWith(`-${taskId}`) && watcher.safeGitRef(name));
+    if (!branch) return null;
+    const count = git(['rev-list', '--count', branch]);
+    if (!count || count.code !== 0) return null;
+    const n = Number(String(count.out).trim());
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 function readStubGit(repo, line, run) {
   const parsed = watcher.parseStubLine(line);
   if (!repo || !parsed) return null;
@@ -766,6 +796,6 @@ module.exports = {
   __test: {
     loadStateEnv, resolveStatePaths, parseLockRecord, lockLooksLive, pickTerminal,
     DISPATCHER, CONFIG_EXAMPLE, openConfig, childEnv, STATE_ENV_KEYS, readRoundsTally,
-    readStubGit,
+    readStubGit, countBranchCommits,
   },
 };

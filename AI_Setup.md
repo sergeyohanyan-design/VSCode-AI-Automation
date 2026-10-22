@@ -222,7 +222,8 @@ one file, not a feature spanning three layers. Then explain to me, briefly:
   `~/.agent-loop-stop-report.md`, and exits cleanly.
 - A watcher runs beside the loop. It reads the heartbeat file and new log
   lines, and writes `~/.agent-loop-watcher-report.md` when it reports or stops
-  something. It does not restart a loop you stopped. `AGENT_LOOP_WATCHER=off`
+  something. It does not restart a loop you stopped. A process that keeps
+  spinning after that stop is killed, and the loop stays stopped. `AGENT_LOOP_WATCHER=off`
   disables it. `auto` (the default) uses headless Claude for an unknown
   failure only when `claude` is on `PATH` and a startup `OK` check succeeds.
   A failed check is one log line, and the playbook still runs. That bundle includes the churn tally

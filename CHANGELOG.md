@@ -10,6 +10,8 @@
 - A kill that misses the process group tries the pid itself. The lock and a new start happen only after the pid is gone, polled for up to 10 seconds. If it is still alive, the watcher writes the stop report and leaves the lock in place.
 - `--reset-stub` counts commits beyond the task's chain base, the same base a fresh fork uses. A stub cut from a predecessor branch is no longer refused for the commits that live only on that predecessor.
 - While the loop is running, a zero-commit stub makes the watcher stop the loop, wait until it exits, run `--reset-stub`, and start it again. The commit count is read with read-only git after the loop has exited. If the reset is refused, the report keeps the two manual steps. A Safe Stop you requested aborts that repair and does not start the loop.
+- A CPU spin during a Safe Stop you requested is killed and the lock is deleted. The loop is not started again, and your stop flag stays. A stop that is not spinning is left alone. A stop the watcher itself wrote does not get this kill.
+- A verify failure that repeats while the task branch is not growing is detected by sampling that branch with read-only `git rev-list --count`. The fast verify failure is unchanged.
 
 ## 1.2.1
 

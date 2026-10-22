@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1
+
+- The bundle sent to headless Claude for an unknown problem includes the churn tally from `~/.agent-loop-rounds.json` (`AGENT_LOOP_ROUNDS`). A missing or unreadable file is sent as no tally. The same resolved path is passed to the dispatcher the button starts.
+
 ## 1.2.0
 
 - Heartbeat file (`~/.agent-loop-heartbeat.json`). The dispatcher rewrites it when the pass loop changes stage and on the stage runner's existing progress tick. The lock file's mtime is not liveness: it keeps moving after the pass loop has stopped. After Safe Stop the stage is `stopped`.

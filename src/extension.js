@@ -22,7 +22,7 @@ const PKG = require('../package.json');
 // Non-secret keys only. CLICKUP_TOKEN and other credentials stay out of the extension host.
 const STATE_ENV_KEYS = new Set([
   'AGENT_LOOP_LOCK', 'AGENT_LOOP_STOP', 'AGENT_LOOP_STOP_REPORT', 'AGENT_LOOP_LOG',
-  'AGENT_LOOP_HEARTBEAT_FILE', 'AGENT_LOOP_UNSAFE', 'AGENT_LOOP_BENCH_FILE',
+  'AGENT_LOOP_HEARTBEAT_FILE', 'AGENT_LOOP_UNSAFE', 'AGENT_LOOP_BENCH_FILE', 'AGENT_LOOP_ROUNDS',
   'AGENT_LOOP_WATCHER', 'AGENT_LOOP_WATCHER_CMD', 'AGENT_LOOP_WATCHER_POLL_S',
   'AGENT_LOOP_WATCHER_MAX_FIXES', 'AGENT_LOOP_WATCHER_MAX_CALLS_PER_H',
   'AGENT_LOOP_WATCHER_REPORT', 'AGENT_LOOP_WATCHER_LOG', 'AGENT_LOOP_WATCHER_STATE',
@@ -61,6 +61,7 @@ function resolveStatePaths(env, home = os.homedir()) {
     heartbeat: statePath(env.AGENT_LOOP_HEARTBEAT_FILE, '.agent-loop-heartbeat.json'),
     unsafe: statePath(env.AGENT_LOOP_UNSAFE, '.agent-loop.unsafe'),
     bench: statePath(env.AGENT_LOOP_BENCH_FILE, '.agent-loop-bench.json'),
+    rounds: statePath(env.AGENT_LOOP_ROUNDS, '.agent-loop-rounds.json'),
     watcherReport: statePath(env.AGENT_LOOP_WATCHER_REPORT, '.agent-loop-watcher-report.md'),
     watcherLog: statePath(env.AGENT_LOOP_WATCHER_LOG, '.agent-loop-watcher.log'),
     watcherState: statePath(env.AGENT_LOOP_WATCHER_STATE, '.agent-loop-watcher-state.json'),
@@ -77,6 +78,7 @@ function childEnv(cwd, paths) {
     AGENT_LOOP_HEARTBEAT_FILE: paths.heartbeat,
     AGENT_LOOP_UNSAFE: paths.unsafe,
     AGENT_LOOP_BENCH_FILE: paths.bench,
+    AGENT_LOOP_ROUNDS: paths.rounds,
   };
 }
 
@@ -397,6 +399,16 @@ function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
 
+// The dispatcher's durable churn map: task id → count, plus `rescope:` and `ops:` keys.
+// Missing or unreadable means there is no tally to send. A list or a bare value is not a tally.
+function readRoundsTally(file, fsApi = fs) {
+  try {
+    const body = JSON.parse(fsApi.readFileSync(file, 'utf8'));
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+    return body;
+  } catch { return null; }
+}
+
 async function collectFacts(env, paths, mode) {
   const now = Date.now();
   const heartbeat = readJson(paths.heartbeat);
@@ -494,6 +506,7 @@ async function collectFacts(env, paths, mode) {
     maxCallsPerHour: numberSetting(env.AGENT_LOOP_WATCHER_MAX_CALLS_PER_H, 4),
     pass: heartbeat && heartbeat.pass,
     loopStopped: !pidAliveNow && !lockPidAlive,
+    rounds: readRoundsTally(paths.rounds),
   };
 }
 
@@ -668,6 +681,6 @@ module.exports = {
   deactivate,
   __test: {
     loadStateEnv, resolveStatePaths, parseLockRecord, lockLooksLive, pickTerminal,
-    DISPATCHER, CONFIG_EXAMPLE, openConfig, childEnv, STATE_ENV_KEYS,
+    DISPATCHER, CONFIG_EXAMPLE, openConfig, childEnv, STATE_ENV_KEYS, readRoundsTally,
   },
 };

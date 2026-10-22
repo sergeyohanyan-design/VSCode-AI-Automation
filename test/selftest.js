@@ -58,6 +58,7 @@ assert.deepEqual(
     heartbeat: path.join(HOME, '.agent-loop-heartbeat.json'),
     unsafe: path.join(HOME, '.agent-loop.unsafe'),
     bench: path.join(HOME, '.agent-loop-bench.json'),
+    rounds: path.join(HOME, '.agent-loop-rounds.json'),
     watcherReport: path.join(HOME, '.agent-loop-watcher-report.md'),
     watcherLog: path.join(HOME, '.agent-loop-watcher.log'),
     watcherState: path.join(HOME, '.agent-loop-watcher-state.json'),
@@ -71,6 +72,7 @@ assert.equal(mixed.lock, path.resolve(HOME, path.join('sub', 'a.lock')));
 assert.equal(mixed.stop, path.join(HOME, '.agent-loop.stop'));
 assert.equal(mixed.report, path.join(HOME, '.agent-loop-stop-report.md'));
 assert.equal(mixed.heartbeat, path.join(HOME, '.agent-loop-heartbeat.json'));
+assert.equal(mixed.rounds, path.join(HOME, '.agent-loop-rounds.json'));
 assert.equal(mixed.watcherState, path.join(HOME, '.agent-loop-watcher-state.json'));
 
 const child = t.childEnv(abs('repo'), t.resolveStatePaths({}, HOME));
@@ -78,6 +80,7 @@ assert.equal(child.AGENT_LOOP_HEARTBEAT_FILE, path.join(HOME, '.agent-loop-heart
 assert.equal(child.AGENT_LOOP_LOG, path.join(HOME, '.agent-loop.log'));
 assert.equal(child.AGENT_LOOP_UNSAFE, path.join(HOME, '.agent-loop.unsafe'));
 assert.equal(child.AGENT_LOOP_BENCH_FILE, path.join(HOME, '.agent-loop-bench.json'));
+assert.equal(child.AGENT_LOOP_ROUNDS, path.join(HOME, '.agent-loop-rounds.json'));
 assert.equal(child.CLICKUP_TOKEN, undefined);
 assert.equal(child.GITHUB_TOKEN, undefined);
 
@@ -117,6 +120,14 @@ assert.equal(secretDrop.AGENT_LOOP_WATCHER, 'on');
 assert.equal(secretDrop.AGENT_LOOP_HEARTBEAT_FILE, 'D:\\state\\hb.json');
 assert.equal(t.STATE_ENV_KEYS.has('CLICKUP_TOKEN'), false);
 assert.equal(t.STATE_ENV_KEYS.has('GITHUB_TOKEN'), false);
+assert.deepEqual(t.readRoundsTally('rounds.json', {
+  readFileSync: () => '{"task-a":2,"rescope:task-a":1}',
+}), { 'task-a': 2, 'rescope:task-a': 1 });
+assert.equal(t.readRoundsTally('missing.json', {
+  readFileSync: () => { throw new Error('ENOENT'); },
+}), null);
+assert.equal(t.readRoundsTally('bad.json', { readFileSync: () => 'not-json' }), null);
+assert.equal(t.readRoundsTally('list.json', { readFileSync: () => '[1,2]' }), null);
 
 assert.deepEqual(t.parseLockRecord('1234'), { pid: 1234, nonce: null });
 assert.deepEqual(t.parseLockRecord('{"pid":4321,"nonce":"abc"}'), { pid: 4321, nonce: 'abc' });
@@ -964,7 +975,10 @@ async function watcherChecks() {
   const ask = decide(frozen);
   assert.equal(ask.row, 'P18');
   assert.equal(ask.needsClaude, true);
+  assert.equal(ask.bundle.rounds, null);
   assert.ok(ask.bundle.allowlist.some(item => item.id === 'stop_and_report'));
+  const withRounds = decide({ ...frozen, rounds: { 'task-a': 2, 'rescope:task-a': 1 } });
+  assert.deepEqual(withRounds.bundle.rounds, { 'task-a': 2, 'rescope:task-a': 1 });
   const down = decide(frozen, watcher.emptyMemory(), { unavailable: true, why: 'timeout' });
   assert.equal(down.action, 'stop_and_report');
   assert.ok(down.report.includes('unavailable'));

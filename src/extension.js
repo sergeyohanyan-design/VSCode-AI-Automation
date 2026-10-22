@@ -572,15 +572,21 @@ async function applyDecision(decision, paths) {
   if (effects.probe) {
     probeNote = await watcher.runProbes(decision.probeMode || 'probe');
   }
+  let killBlocked = null;
   if (effects.kill) {
     let lock = null;
     try { lock = parseLockRecord(fs.readFileSync(paths.lock, 'utf8')); } catch { /* lock already gone */ }
     const heartbeat = readJson(paths.heartbeat);
-    if (!lock || !heartbeat || lock.pid !== heartbeat.pid || !lock.nonce || lock.nonce !== heartbeat.nonce) {
-      watcher.appendLog(paths.watcherLog, 'refused to kill: lock nonce does not match the heartbeat');
-    } else {
-      watcher.killProcessTree(lock.pid);
+    const identityOk = !!(lock && heartbeat && lock.pid === heartbeat.pid && lock.nonce && lock.nonce === heartbeat.nonce);
+    let stillAlive = true;
+    let detail = 'pid still alive after kill';
+    if (identityOk) {
+      const killed = watcher.killProcessTree(lock.pid);
+      detail = killed.detail;
+      stillAlive = !(await watcher.waitUntilDead(lock.pid, { alive: pidAlive }));
     }
+    const settled = watcher.settleKill({ requested: true, identityOk, stillAlive, detail });
+    if (!settled.proceed) killBlocked = settled.reason;
   }
   if (effects.recover) {
     const cwd = repoRoot();
@@ -594,13 +600,16 @@ async function applyDecision(decision, paths) {
     const cwd = repoRoot();
     if (cwd) await runNode([DISPATCHER, '--bench-coder', decision.coderName, '--yes'], cwd);
   }
-  if (effects.clearLock) { try { fs.unlinkSync(paths.lock); } catch { /* already gone */ } }
-  if (effects.clearStop) { try { fs.unlinkSync(paths.stop); } catch { /* already gone */ } }
-  if (effects.writeStopFlag) fs.writeFileSync(paths.stop, watcher.watcherStopText(new Date()));
-  if (decision.report) {
-    const body = probeNote ? `${decision.report}\n- probe output:\n\n\`\`\`\n${probeNote}\n\`\`\`\n` : decision.report;
+  if (!killBlocked && effects.clearLock) { try { fs.unlinkSync(paths.lock); } catch { /* already gone */ } }
+  if (!killBlocked && effects.clearStop) { try { fs.unlinkSync(paths.stop); } catch { /* already gone */ } }
+  if (killBlocked || effects.writeStopFlag) fs.writeFileSync(paths.stop, watcher.watcherStopText(new Date()));
+  if (decision.report || killBlocked) {
+    let body = decision.report || '';
+    if (probeNote) body += `\n- probe output:\n\n\`\`\`\n${probeNote}\n\`\`\`\n`;
+    if (killBlocked) body += `\n- result: kill failed (${watcher.redact(killBlocked)}). The lock was left in place.\n`;
     watcher.writeReport(paths.watcherReport, body);
   }
+  if (killBlocked) watcher.appendLog(paths.watcherLog, `kill failed: ${killBlocked}`);
   if (decision.logLine) watcher.appendLog(paths.watcherLog, decision.logLine);
   if (effects.notify && vscode.window) {
     const show = decision.response === 'STOP' ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
@@ -608,7 +617,7 @@ async function applyDecision(decision, paths) {
       if (pick) vscode.commands.executeCommand('agentLoop.openWatcherReport');
     });
   }
-  if (effects.start) {
+  if (!killBlocked && effects.start) {
     let flag = '';
     try { flag = fs.readFileSync(paths.stop, 'utf8'); } catch { /* no flag */ }
     if (watcher.isUserStop(flag) || watcher.isWatcherStop(flag)) {

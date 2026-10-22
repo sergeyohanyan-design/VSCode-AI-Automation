@@ -1034,21 +1034,56 @@ function finish(facts, mem, now, hit, claude) {
   };
 }
 
-function killProcessTree(pid) {
+function killProcessTree(pid, opts = {}) {
   const id = Number(pid);
   if (!Number.isInteger(id) || id <= 0) return { ok: false, detail: 'no pid' };
-  if (process.platform === 'win32') {
-    const r = cp.spawnSync('taskkill', ['/PID', String(id), '/T', '/F'], {
+  const platform = opts.platform || process.platform;
+  if (platform === 'win32') {
+    const spawnSync = opts.spawnSync || cp.spawnSync;
+    const r = spawnSync('taskkill', ['/PID', String(id), '/T', '/F'], {
       stdio: 'ignore', windowsHide: true, timeout: 5000,
     });
     return { ok: r.status === 0 || r.status === 128, detail: `taskkill exit ${r.status}` };
   }
-  try { process.kill(-id, 'SIGKILL'); return { ok: true, detail: 'killed process group' }; }
-  catch (e) {
-    if (e.code === 'ESRCH') return { ok: true, detail: 'already gone' };
-    try { process.kill(id, 'SIGKILL'); return { ok: true, detail: 'killed pid' }; }
-    catch (e2) { return { ok: false, detail: e2.message }; }
+  const kill = opts.kill || ((target, sig) => process.kill(target, sig));
+  try {
+    kill(-id, 'SIGKILL');
+    return { ok: true, detail: 'killed process group' };
+  } catch (e) {
+    try {
+      kill(id, 'SIGKILL');
+      return { ok: true, detail: 'killed pid' };
+    } catch (e2) {
+      if (e2.code === 'ESRCH') return { ok: true, detail: 'already gone' };
+      return { ok: false, detail: e2.message };
+    }
   }
+}
+
+function settleKill(input = {}) {
+  if (!input.requested) return { proceed: true, reason: null };
+  if (!input.identityOk) return { proceed: false, reason: 'lock nonce does not match the heartbeat' };
+  if (input.stillAlive) return { proceed: false, reason: input.detail || 'pid still alive after kill' };
+  return { proceed: true, reason: null };
+}
+
+function pidExists(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return e.code === 'EPERM'; }
+}
+
+async function waitUntilDead(pid, opts = {}) {
+  const alive = opts.alive || pidExists;
+  const wait = opts.wait || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 10_000;
+  const stepMs = opts.stepMs || 200;
+  const start = Date.now();
+  while (alive(pid)) {
+    if (Date.now() - start >= timeoutMs) return false;
+    const left = timeoutMs - (Date.now() - start);
+    await wait(Math.min(stepMs, Math.max(0, left)));
+  }
+  return true;
 }
 
 function spawnCaptured(argv, { input = null, cwd, timeoutMs = CLAUDE_TIMEOUT_MS } = {}) {
@@ -1247,7 +1282,7 @@ module.exports = {
   REPEAT_N, REPEAT_WINDOW_MS, CONFIDENCE_MIN, P7_WINDOW_MS,
   redact, readNewLog, normalizeSignature, stageLimitMs, tailText, creditExhausted,
   isUserStop, isWatcherStop, watcherStopText, identityMatches, preconditions,
-  parseClaudeVerdict, evaluate, quoteCmdArg, killProcessTree, spawnCaptured, runClaude,
+  parseClaudeVerdict, evaluate, quoteCmdArg, killProcessTree, settleKill, waitUntilDead, spawnCaptured, runClaude,
   probePlan, runProbes, loadMemory, saveMemory, appendLog, writeReport, newestMtime,
   parseSample, sampleScript, sampleProcess, watcherMode, pollSeconds, claudeOnPath,
   emptyMemory, forgetRun, p1Signals, p2Signals, coderWasActiveBeforeKill,

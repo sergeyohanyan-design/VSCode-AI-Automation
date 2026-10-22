@@ -1136,6 +1136,39 @@ async function watcherChecks() {
   assert.equal(quotaFail.ok, false);
   assert.equal(quotaFail.unavailable, true);
   assert.ok(String(quotaFail.why).toLowerCase().includes('quota'));
+
+  const groupCalls = [];
+  const groupKill = watcher.killProcessTree(42, {
+    platform: 'linux',
+    kill(target) {
+      groupCalls.push(target);
+      if (target < 0) {
+        const err = new Error('no group');
+        err.code = 'ESRCH';
+        throw err;
+      }
+    },
+  });
+  assert.deepEqual(groupCalls, [-42, 42]);
+  assert.equal(groupKill.ok, true);
+  assert.equal(groupKill.detail, 'killed pid');
+  assert.equal(watcher.settleKill({
+    requested: true, identityOk: true, stillAlive: true, detail: 'taskkill exit 1',
+  }).proceed, false);
+  assert.equal(watcher.settleKill({ requested: true, identityOk: false, stillAlive: false }).proceed, false);
+  assert.equal(watcher.settleKill({ requested: true, identityOk: true, stillAlive: false }).proceed, true);
+  let polls = 0;
+  assert.equal(await watcher.waitUntilDead(5, {
+    alive: () => ++polls < 3,
+    wait: async () => {},
+    timeoutMs: 1000,
+    stepMs: 1,
+  }), true);
+  assert.equal(await watcher.waitUntilDead(5, {
+    alive: () => true,
+    wait: async () => {},
+    timeoutMs: 0,
+  }), false);
 }
 
 watcherChecks().then(() => {

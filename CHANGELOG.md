@@ -7,6 +7,7 @@
 - A new dispatcher run (a new lock nonce, or Start) drops the previous run's log lines, error counts, quiet windows, holds, and probe marks. Fix counters stay for their 6 hour limit. Playbook rows match only lines after the latest `=== start:` line. `STOP: no coder available` counts only when it happens 3 times within 15 minutes.
 - A short reviewer cooldown whose clock time is already earlier than the log line is the next day. A line at 23:00 that says `try again at 2:31 AM` waits. It does not stop the loop.
 - Exit 0 with a JSON verdict is a successful Claude call. The word "quota" in that verdict is not an auth failure. Auth or quota text counts only on stderr of a non-zero exit.
+- A kill that misses the process group tries the pid itself. The lock and a new start happen only after the pid is gone, polled for up to 10 seconds. If it is still alive, the watcher writes the stop report and leaves the lock in place.
 
 ## 1.2.1
 

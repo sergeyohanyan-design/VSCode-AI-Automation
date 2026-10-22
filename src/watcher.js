@@ -24,12 +24,13 @@ const MAX_WAIT_MIN = 60;
 const BOARD_HOLD_PASSES = 3;
 const CPU_WEDGE = 0.7;
 
-// Checked against `claude --help`: -p is print-and-exit, --tools "" disables every built-in
-// tool, --permission-prompts none denies anything that would prompt, --bare skips project
-// settings and CLAUDE.md, --no-session-persistence keeps the temp run off disk.
+// Checked against `claude --help` and a real `claude -p` run. --bare forces API-key auth and
+// rejects a subscription login ("Not logged in"), so it is not used. --tools "" disables every
+// built-in tool, --permission-prompts none denies anything that would prompt, and
+// --no-session-persistence keeps the temp run off disk.
 const DEFAULT_CLAUDE_ARGS = [
   'claude', '-p', '--model', 'sonnet', '--tools', '',
-  '--permission-prompts', 'none', '--bare', '--no-session-persistence',
+  '--permission-prompts', 'none', '--no-session-persistence',
 ];
 const DEFAULT_CLAUDE_CMD = DEFAULT_CLAUDE_ARGS.map(quoteCmdArg).join(' ');
 
@@ -284,6 +285,22 @@ function watcherMode(value, claudeOnPath) {
   if (mode === 'off') return 'off';
   if (mode === 'on' || mode === 'auto') return claudeOnPath ? 'full' : 'playbook';
   return claudeOnPath ? 'full' : 'playbook';
+}
+
+// Full mode stays playbook until a self-check has answered OK. A failed check stays playbook.
+function effectiveWatcherMode(mode, selfCheck) {
+  if (mode !== 'full') return mode;
+  if (!selfCheck || selfCheck.ok !== true) return 'playbook';
+  return 'full';
+}
+
+function claudeSelfCheckPassed(result) {
+  return !!(result && result.ok === true && /\bOK\b/.test(result.text || ''));
+}
+
+function claudeSelfCheckLog(result) {
+  const reason = redact(result && result.reason ? result.reason : 'did not reply OK');
+  return `claude self-check failed (${reason}); watcher playbook only`;
 }
 
 function pollSeconds(value) {
@@ -1159,4 +1176,5 @@ module.exports = {
   probePlan, runProbes, loadMemory, saveMemory, appendLog, writeReport, newestMtime,
   parseSample, sampleScript, sampleProcess, watcherMode, pollSeconds, claudeOnPath,
   emptyMemory, p1Signals, p2Signals, coderWasActiveBeforeKill,
+  effectiveWatcherMode, claudeSelfCheckPassed, claudeSelfCheckLog,
 };

@@ -290,7 +290,8 @@ handover report to `~/.agent-loop-stop-report.md`, and exits cleanly.
 While the loop runs, the extension also runs a watcher. It reads
 `~/.agent-loop-heartbeat.json` and new lines from `~/.agent-loop.log`. A known
 failure is repaired, waited out, reported, or stopped. An unknown one can be
-sent to `claude -p` with no tools. That bundle includes the churn tally in
+sent to `claude -p` with no tools. The command is checked with `Reply with exactly: OK`
+first; a failure is logged once and the playbook keeps running. That bundle includes the churn tally in
 `~/.agent-loop-rounds.json`. Set `AGENT_LOOP_WATCHER=off` to disable it.
 A report lands in `~/.agent-loop-watcher-report.md`. Your Safe Stop is left
 alone: the watcher does not start the loop again after you stop it. Two repairs

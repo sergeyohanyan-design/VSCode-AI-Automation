@@ -434,9 +434,19 @@ async function watcherChecks() {
   assert.equal(watcher.quoteCmdArg('sonnet'), 'sonnet');
   assert.deepEqual(watcher.DEFAULT_CLAUDE_ARGS, [
     'claude', '-p', '--model', 'sonnet', '--tools', '',
-    '--permission-prompts', 'none', '--bare', '--no-session-persistence',
+    '--permission-prompts', 'none', '--no-session-persistence',
   ]);
+  assert.equal(watcher.DEFAULT_CLAUDE_ARGS.includes('--bare'), false);
   assert.ok(watcher.DEFAULT_CLAUDE_CMD.includes('--tools ""'));
+  assert.equal(watcher.DEFAULT_CLAUDE_CMD.includes('--bare'), false);
+  assert.equal(watcher.effectiveWatcherMode('full', null), 'playbook');
+  assert.equal(watcher.effectiveWatcherMode('full', { ok: false, reason: 'Not logged in' }), 'playbook');
+  assert.equal(watcher.effectiveWatcherMode('full', { ok: true }), 'full');
+  assert.equal(watcher.effectiveWatcherMode('off', { ok: true }), 'off');
+  assert.equal(watcher.claudeSelfCheckPassed({ ok: true, text: 'OK\n' }), true);
+  assert.equal(watcher.claudeSelfCheckPassed({ ok: false, text: 'OK\n' }), false);
+  assert.equal(watcher.claudeSelfCheckPassed({ ok: true, text: 'Not logged in' }), false);
+  assert.ok(watcher.claudeSelfCheckLog({ ok: false, reason: 'Not logged in' }).includes('playbook only'));
   assert.equal(watcher.REPEAT_N, 3);
   assert.equal(watcher.REPEAT_WINDOW_MS, 15 * 60 * 1000);
 

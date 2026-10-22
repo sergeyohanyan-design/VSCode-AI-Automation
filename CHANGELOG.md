@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.2
+
+- The headless Claude command no longer passes `--bare`. That flag accepts only an API key, so a subscription login failed every call with "Not logged in". When the watcher starts in full mode it sends `Reply with exactly: OK`. A failure is one watcher-log line, and only the playbook runs after that.
+
 ## 1.2.1
 
 - The bundle sent to headless Claude for an unknown problem includes the churn tally from `~/.agent-loop-rounds.json` (`AGENT_LOOP_ROUNDS`). A missing or unreadable file is sent as no tally. The same resolved path is passed to the dispatcher the button starts.

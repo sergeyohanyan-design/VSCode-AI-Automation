@@ -59,8 +59,10 @@ Beyond the routing, the parts that matter in practice:
 - **Watcher.** While the loop runs, the extension watches a heartbeat file and the new log
   lines. A known failure gets a fixed response (repair, wait, report, or Safe Stop). An unknown
   frozen loop or a repeated unknown error is sent to headless Claude with no tools, and only an
-  allowlisted action can run. That bundle includes the churn tally in
-  `~/.agent-loop-rounds.json`. A zero-commit stub branch can be deleted, and a coder
+  allowlisted action can run. Before the first call it checks that the command
+  replies `OK`; if not, the playbook runs and the watcher log says why. That
+  bundle includes the churn tally in `~/.agent-loop-rounds.json`. A zero-commit
+  stub branch can be deleted, and a coder
   that is out of credit can be benched, only through a dispatcher command that
   re-checks the preconditions. Your own Safe Stop is never restarted. The report is
   `~/.agent-loop-watcher-report.md`.

@@ -348,22 +348,43 @@ let watcherBusy = false;
 let watcherMemory = null;
 let watcherClaudeOnPath = null;
 let playbookLogged = false;
+let claudeSelfCheck = null;
+let claudeCheckPromise = null;
 
 function watcherSettings() {
   const env = loadStateEnv();
   if (watcherClaudeOnPath == null) watcherClaudeOnPath = watcher.claudeOnPath();
+  const configured = watcher.watcherMode(env.AGENT_LOOP_WATCHER, watcherClaudeOnPath);
   return {
     env,
     paths: resolveStatePaths(env),
-    mode: watcher.watcherMode(env.AGENT_LOOP_WATCHER, watcherClaudeOnPath),
+    configured,
+    mode: watcher.effectiveWatcherMode(configured, claudeSelfCheck),
   };
 }
 
+function ensureClaudeSelfCheck(env, paths) {
+  if (claudeSelfCheck || claudeCheckPromise) return;
+  const command = env.AGENT_LOOP_WATCHER_CMD || watcher.DEFAULT_CLAUDE_CMD;
+  claudeCheckPromise = watcher.spawnCaptured(command, { input: 'Reply with exactly: OK' }).then(result => {
+    if (watcher.claudeSelfCheckPassed(result)) {
+      claudeSelfCheck = { ok: true };
+      return;
+    }
+    claudeSelfCheck = { ok: false, reason: result.why || String(result.text || result.err || 'did not reply OK').slice(0, 300) };
+    try { watcher.appendLog(paths.watcherLog, watcher.claudeSelfCheckLog(claudeSelfCheck)); } catch { /* log is best-effort */ }
+  }).catch(e => {
+    claudeSelfCheck = { ok: false, reason: e.message };
+    try { watcher.appendLog(paths.watcherLog, watcher.claudeSelfCheckLog(claudeSelfCheck)); } catch { /* log is best-effort */ }
+  });
+}
+
 function ensureWatcher() {
-  const { env, paths, mode } = watcherSettings();
-  if (mode === 'off') return;
+  const { env, paths, configured } = watcherSettings();
+  if (configured === 'off') return;
+  if (configured === 'full') ensureClaudeSelfCheck(env, paths);
   if (watcherTimer) return;
-  if (mode === 'playbook' && !playbookLogged) {
+  if (configured === 'playbook' && !playbookLogged) {
     try { watcher.appendLog(paths.watcherLog, 'watcher playbook only; claude is not on PATH'); } catch { /* log is best-effort */ }
     playbookLogged = true;
   }

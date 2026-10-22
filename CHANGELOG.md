@@ -6,6 +6,7 @@
 - The watcher no longer stops on the tick that follows Start, before the dispatcher has written its lock. It stays up until it has seen that run, or for 2 minutes with no dispatcher. The 3-second poller starts it again when the loop is running and the timer is gone.
 - A new dispatcher run (a new lock nonce, or Start) drops the previous run's log lines, error counts, quiet windows, holds, and probe marks. Fix counters stay for their 6 hour limit. Playbook rows match only lines after the latest `=== start:` line. `STOP: no coder available` counts only when it happens 3 times within 15 minutes.
 - A short reviewer cooldown whose clock time is already earlier than the log line is the next day. A line at 23:00 that says `try again at 2:31 AM` waits. It does not stop the loop.
+- Exit 0 with a JSON verdict is a successful Claude call. The word "quota" in that verdict is not an auth failure. Auth or quota text counts only on stderr of a non-zero exit.
 
 ## 1.2.1
 

@@ -1120,6 +1120,22 @@ async function watcherChecks() {
   assert.ok(echoed.text.includes('hello'));
   assert.ok(echoed.text.includes('pk_[redacted]'));
   assert.equal(echoed.text.includes('pk_123456'), false);
+  const quotaAnswer = JSON.stringify({
+    diagnosis: 'reviewer quota reached', action: 'wait', confidence: 0.9, why: 'quota', human_fix: 'wait',
+  });
+  const quotaReply = await watcher.spawnCaptured(
+    `${exe} -e "process.stdin.pipe(process.stdout)"`,
+    { input: quotaAnswer, timeoutMs: 15_000 },
+  );
+  assert.equal(quotaReply.ok, true, quotaReply.why || quotaReply.err);
+  assert.equal(quotaReply.unavailable, false);
+  const quotaFail = await watcher.spawnCaptured(
+    `${exe} -e "console.error('quota exceeded'); process.exit(1)"`,
+    { timeoutMs: 15_000 },
+  );
+  assert.equal(quotaFail.ok, false);
+  assert.equal(quotaFail.unavailable, true);
+  assert.ok(String(quotaFail.why).toLowerCase().includes('quota'));
 }
 
 watcherChecks().then(() => {

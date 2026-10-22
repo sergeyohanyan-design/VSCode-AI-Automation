@@ -1075,11 +1075,17 @@ function spawnCaptured(argv, { input = null, cwd, timeoutMs = CLAUDE_TIMEOUT_MS 
     child.stderr.on('data', d => { err += d; });
     child.on('error', e => finish({ ok: false, unavailable: true, why: e.message, code: null }));
     child.on('close', code => {
-      const blob = `${out}\n${err}`;
-      const auth = /not logged|authentication|organization|usage limit|rate limit|quota/i.test(blob);
-      if (code !== 0 || auth) {
-        finish({ ok: false, unavailable: true, why: auth ? redact(blob).slice(0, 300) : `exit ${code}`, code });
-      } else finish({ ok: true, unavailable: false, why: null, code });
+      if (code === 0) {
+        finish({ ok: true, unavailable: false, why: null, code });
+        return;
+      }
+      const auth = /not logged|authentication|organization|usage limit|rate limit|quota/i.test(err);
+      finish({
+        ok: false,
+        unavailable: true,
+        why: auth ? redact(err).slice(0, 300) : `exit ${code}`,
+        code,
+      });
     });
     try {
       if (input != null) child.stdin.write(String(input));
@@ -1088,12 +1094,17 @@ function spawnCaptured(argv, { input = null, cwd, timeoutMs = CLAUDE_TIMEOUT_MS 
   });
 }
 
-function runClaude(cmd, bundle, opts = {}) {
+async function runClaude(cmd, bundle, opts = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-loop-watcher-'));
   const payload = redact(typeof bundle === 'string' ? bundle : JSON.stringify(bundle));
   const argv = cmd ? null : DEFAULT_CLAUDE_ARGS;
   const command = cmd || argv.map(quoteCmdArg).join(' ');
-  return spawnCaptured(command, { input: payload, cwd: dir, timeoutMs: opts.timeoutMs || CLAUDE_TIMEOUT_MS });
+  const result = await spawnCaptured(command, { input: payload, cwd: dir, timeoutMs: opts.timeoutMs || CLAUDE_TIMEOUT_MS });
+  if (!result.ok) return result;
+  if (!parseClaudeVerdict(result.text).ok) {
+    return { ...result, ok: false, unavailable: true, why: 'no parseable verdict' };
+  }
+  return result;
 }
 
 function probePlan(mode) {

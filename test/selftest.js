@@ -50,7 +50,18 @@ assert.deepEqual(
     },
     HOME,
   ),
-  { lock: abs('custom.lock'), stop: abs('custom.stop'), report: abs('custom-report.md') },
+  {
+    lock: abs('custom.lock'),
+    stop: abs('custom.stop'),
+    report: abs('custom-report.md'),
+    log: path.join(HOME, '.agent-loop.log'),
+    heartbeat: path.join(HOME, '.agent-loop-heartbeat.json'),
+    unsafe: path.join(HOME, '.agent-loop.unsafe'),
+    bench: path.join(HOME, '.agent-loop-bench.json'),
+    watcherReport: path.join(HOME, '.agent-loop-watcher-report.md'),
+    watcherLog: path.join(HOME, '.agent-loop-watcher.log'),
+    watcherState: path.join(HOME, '.agent-loop-watcher-state.json'),
+  },
 );
 
 // A RELATIVE override resolves against home, and an absent one falls back to the documented default
@@ -59,6 +70,16 @@ const mixed = t.resolveStatePaths({ AGENT_LOOP_LOCK: path.join('sub', 'a.lock') 
 assert.equal(mixed.lock, path.resolve(HOME, path.join('sub', 'a.lock')));
 assert.equal(mixed.stop, path.join(HOME, '.agent-loop.stop'));
 assert.equal(mixed.report, path.join(HOME, '.agent-loop-stop-report.md'));
+assert.equal(mixed.heartbeat, path.join(HOME, '.agent-loop-heartbeat.json'));
+assert.equal(mixed.watcherState, path.join(HOME, '.agent-loop-watcher-state.json'));
+
+const child = t.childEnv(abs('repo'), t.resolveStatePaths({}, HOME));
+assert.equal(child.AGENT_LOOP_HEARTBEAT_FILE, path.join(HOME, '.agent-loop-heartbeat.json'));
+assert.equal(child.AGENT_LOOP_LOG, path.join(HOME, '.agent-loop.log'));
+assert.equal(child.AGENT_LOOP_UNSAFE, path.join(HOME, '.agent-loop.unsafe'));
+assert.equal(child.AGENT_LOOP_BENCH_FILE, path.join(HOME, '.agent-loop-bench.json'));
+assert.equal(child.CLICKUP_TOKEN, undefined);
+assert.equal(child.GITHUB_TOKEN, undefined);
 
 const loaded = t.loadStateEnv(
   { AGENT_LOOP_ENV: 'test.env' },
@@ -76,6 +97,26 @@ assert.deepEqual(loaded, {
   AGENT_LOOP_LOCK: 'D:\\state\\from-file.lock',
   AGENT_LOOP_STOP: 'D:\\state\\from-file.stop',
 });
+
+const secretDrop = t.loadStateEnv(
+  {},
+  'C:\\Users\\Test',
+  {
+    existsSync: () => true,
+    readFileSync: () => [
+      'CLICKUP_TOKEN=pk_secret',
+      'GITHUB_TOKEN=ghp_secret',
+      'AGENT_LOOP_WATCHER=on',
+      'AGENT_LOOP_HEARTBEAT_FILE=D:\\state\\hb.json',
+    ].join('\n'),
+  },
+);
+assert.equal(secretDrop.CLICKUP_TOKEN, undefined);
+assert.equal(secretDrop.GITHUB_TOKEN, undefined);
+assert.equal(secretDrop.AGENT_LOOP_WATCHER, 'on');
+assert.equal(secretDrop.AGENT_LOOP_HEARTBEAT_FILE, 'D:\\state\\hb.json');
+assert.equal(t.STATE_ENV_KEYS.has('CLICKUP_TOKEN'), false);
+assert.equal(t.STATE_ENV_KEYS.has('GITHUB_TOKEN'), false);
 
 assert.deepEqual(t.parseLockRecord('1234'), { pid: 1234, nonce: null });
 assert.deepEqual(t.parseLockRecord('{"pid":4321,"nonce":"abc"}'), { pid: 4321, nonce: 'abc' });
@@ -103,6 +144,7 @@ const dispatcherSrc = fs.readFileSync(t.DISPATCHER, 'utf8');
 const SHIPPED = [
   path.join(SRC, 'agent-loop.mjs'),
   path.join(SRC, 'extension.js'),
+  path.join(SRC, 'watcher.js'),
   path.join(SRC, 'setup.js'),
   path.join(ROOT, 'agent-loop.env.example'),
   path.join(ROOT, 'package.json'),
@@ -146,6 +188,9 @@ const envKeys = new Set([
 // Set by the dispatcher rather than read from config, or a fixture used only by --selftest.
 for (const internal of ['GIT_TERMINAL_PROMPT', 'AGENT_LOOP_SELFTEST_NUM', 'AGENT_LOOP_SHUTDOWN_PROBE']) envKeys.delete(internal);
 for (const key of [...envKeys].sort()) {
+  assert.ok(configExample.includes(key), `agent-loop.env.example does not document ${key}`);
+}
+for (const key of t.STATE_ENV_KEYS) {
   assert.ok(configExample.includes(key), `agent-loop.env.example does not document ${key}`);
 }
 
@@ -216,7 +261,7 @@ assert.ok(fs.existsSync(t.CONFIG_EXAMPLE), `config example missing at ${t.CONFIG
 
 // ---------- packaging: everything the runtime needs must be shippable ----------
 const ignore = fs.readFileSync(path.join(ROOT, '.vscodeignore'), 'utf8').split(/\r?\n/).map(l => l.trim());
-for (const required of ['src/extension.js', 'src/setup.js', 'src/agent-loop.mjs', 'package.json', 'agent-loop.env.example', 'README.md', 'LICENSE.md']) {
+for (const required of ['src/extension.js', 'src/setup.js', 'src/watcher.js', 'src/agent-loop.mjs', 'package.json', 'agent-loop.env.example', 'README.md', 'LICENSE.md']) {
   assert.ok(fs.existsSync(path.join(ROOT, required)), `missing ${required}`);
   assert.ok(!ignore.some(rule => rule === required || rule === `${required.split('/')[0]}/**`),
     `.vscodeignore would exclude ${required} from the .vsix`);
@@ -239,7 +284,7 @@ assert.equal(png.subarray(1, 4).toString('ascii'), 'PNG', 'the icon must be a re
 const [iw, ih] = [png.readUInt32BE(16), png.readUInt32BE(20)];
 assert.equal(iw, ih, `icon must be square, got ${iw}x${ih}`);
 assert.ok(iw >= 128, `icon must be at least 128px, got ${iw}px`);
-for (const cmd of ['agentLoop.toggle', 'agentLoop.setup', 'agentLoop.checkBoard', 'agentLoop.openConfig', 'agentLoop.safeStop', 'agentLoop.forceStop', 'agentLoop.openStopReport', 'agentLoop.recover']) {
+for (const cmd of ['agentLoop.toggle', 'agentLoop.setup', 'agentLoop.checkBoard', 'agentLoop.openConfig', 'agentLoop.safeStop', 'agentLoop.forceStop', 'agentLoop.openStopReport', 'agentLoop.recover', 'agentLoop.openWatcherReport']) {
   assert.ok(pkg.contributes.commands.some(c => c.command === cmd), `package.json does not contribute ${cmd}`);
 }
 
@@ -307,4 +352,692 @@ for (const cmd of ['agentLoop.toggle', 'agentLoop.setup', 'agentLoop.checkBoard'
   }
 }
 
-console.log('agent-loop selftest: OK');
+// ---------- watcher playbook ----------
+// Pure decisions. No vscode, no network, no live process sample. Log lines use the dispatcher's
+// `[ISO] ` prefix. Paths and task ids in here are fixtures (`Task A`, ClickUp-style `123`).
+const watcher = require(path.join(SRC, 'watcher.js'));
+const NOW = Date.parse('2026-10-22T12:00:00.000Z');
+
+function atLocal(hour, minute, base = NOW) {
+  const d = new Date(base);
+  d.setHours(hour, minute, 0, 0);
+  return d.getTime();
+}
+function stamp(ms, body) {
+  return `[${new Date(ms).toISOString()}] ${body}`;
+}
+function baseFacts(over = {}) {
+  return {
+    now: NOW,
+    pid: 10,
+    pidAlive: true,
+    lockExists: true,
+    lockPidAlive: true,
+    lock: { pid: 10, nonce: 'abc' },
+    heartbeat: { pid: 10, nonce: 'abc', stage: 'idle', pass: 1 },
+    heartbeatAgeMs: 1000,
+    children: [],
+    lines: [],
+    env: {},
+    claudeMode: 'playbook',
+    maxFixes: 2,
+    maxCallsPerHour: 4,
+    phase2: false,
+    cpuRatio: 0,
+    ioUnchanged: false,
+    ioGapMs: 10_000,
+    ...over,
+  };
+}
+function decide(over, memory, claude) {
+  return watcher.evaluate(baseFacts(over), memory || watcher.emptyMemory(), claude);
+}
+function wedge(over = {}) {
+  return {
+    heartbeat: { pid: 10, nonce: 'abc', stage: 'implement', pass: 1 },
+    heartbeatAgeMs: 1_900_000,
+    cpuRatio: 1,
+    ioUnchanged: true,
+    ioGapMs: 10_000,
+    children: [],
+    ...over,
+  };
+}
+
+async function watcherChecks() {
+  assert.equal(watcher.PHASE2, false);
+  assert.equal(watcher.stageLimitMs('implement', {}), 1_800_000);
+  assert.equal(watcher.stageLimitMs('review', {}), 1_200_000);
+  assert.equal(watcher.stageLimitMs('adjudicate', {}), 1_200_000);
+  assert.equal(watcher.stageLimitMs('verify', {}), 2_100_000);
+  assert.equal(watcher.stageLimitMs('idle', {}), 1_200_000);
+  assert.equal(watcher.stageLimitMs('verify', { AGENT_LOOP_VERIFY_TIMEOUT_S: '1800' }), 2_400_000);
+  assert.equal(watcher.pollSeconds(undefined), 60);
+  assert.equal(watcher.pollSeconds(5), 10);
+  assert.equal(watcher.pollSeconds(99_999), 3600);
+  assert.equal(watcher.watcherMode('off', true), 'off');
+  assert.equal(watcher.watcherMode('auto', false), 'playbook');
+  assert.equal(watcher.watcherMode('auto', true), 'full');
+  assert.equal(watcher.watcherMode('on', false), 'playbook');
+  assert.equal(watcher.quoteCmdArg(''), '""');
+  assert.equal(watcher.quoteCmdArg('sonnet'), 'sonnet');
+  assert.deepEqual(watcher.DEFAULT_CLAUDE_ARGS, [
+    'claude', '-p', '--model', 'sonnet', '--tools', '',
+    '--permission-prompts', 'none', '--bare', '--no-session-persistence',
+  ]);
+  assert.ok(watcher.DEFAULT_CLAUDE_CMD.includes('--tools ""'));
+  assert.equal(watcher.REPEAT_N, 3);
+  assert.equal(watcher.REPEAT_WINDOW_MS, 15 * 60 * 1000);
+
+  const secret = [
+    'pk_123456_ABC',
+    'sk-abcDEF123',
+    'xai-abcDEF123',
+    'ghp_abcDEF123456',
+    'Bearer super-secret',
+    'CLICKUP_TOKEN=pk_123456_ABC',
+    'https://user:pass@example.com/a',
+  ].join(' ');
+  const red = watcher.redact(secret);
+  for (const raw of ['pk_123456', 'sk-abc', 'xai-abc', 'ghp_abc', 'super-secret', 'user:pass']) {
+    assert.equal(red.includes(raw), false, `redact left ${raw} in: ${red}`);
+  }
+  assert.ok(red.includes('pk_[redacted]'));
+  assert.ok(red.includes('sk-[redacted]'));
+  assert.ok(red.includes('xai-[redacted]'));
+  assert.ok(red.includes('ghp_[redacted]'));
+  assert.ok(red.includes('Bearer [redacted]'));
+  assert.ok(red.includes('CLICKUP_TOKEN=[redacted]'));
+  assert.ok(red.includes('https://[redacted]@example.com/a'));
+
+  assert.equal(
+    watcher.normalizeSignature('[2026-10-22T12:00:00.000Z] task abcdef1234 failed 3 times'),
+    'task # failed # times',
+  );
+  assert.equal(
+    watcher.normalizeSignature('[2026-10-22T12:00:00.000Z] FATAL code 1'),
+    watcher.normalizeSignature('[2026-10-22T12:01:00.000Z] FATAL code 22'),
+  );
+
+  const partial = Buffer.from('hello\npartial');
+  const got = watcher.readNewLog(partial, 0);
+  assert.deepEqual(got.lines, ['hello']);
+  assert.equal(got.nextOffset, 6);
+  assert.deepEqual(watcher.readNewLog(partial, 100).lines, []);
+
+  assert.equal(watcher.identityMatches(baseFacts()), true);
+  assert.equal(watcher.identityMatches(baseFacts({ lock: { pid: 10, nonce: 'OTHER' } })), false);
+  assert.equal(watcher.identityMatches(baseFacts({ heartbeat: { pid: 11, nonce: 'abc', stage: 'idle' } })), false);
+  assert.ok(watcher.isUserStop('requested 2026-10-22T11:00:00.000Z from the Agent Loop button\n'));
+  assert.equal(watcher.isUserStop(watcher.watcherStopText(new Date(NOW))), false);
+  assert.equal(watcher.isWatcherStop(watcher.watcherStopText(new Date(NOW))), true);
+  assert.ok(watcher.watcherStopText(new Date(NOW)).includes('by the watcher'));
+
+  const alive = { lockExists: true, lockPidAlive: true, lock: { pid: 10, nonce: 'abc' }, heartbeat: { pid: 10, nonce: 'abc' }, pid: 10, pidAlive: true };
+  assert.equal(watcher.preconditions('wait', {}).ok, true);
+  assert.equal(watcher.preconditions('clear_stale_lock', { lockExists: true, lockPidAlive: false }).ok, true);
+  assert.equal(watcher.preconditions('clear_stale_lock', { lockExists: true, lockPidAlive: true }).ok, false);
+  assert.equal(watcher.preconditions('kill_and_recover', baseFacts(wedge())).ok, true);
+  assert.equal(watcher.preconditions('kill_and_recover', baseFacts(wedge({ lock: { pid: 10, nonce: 'OTHER' } }))).ok, false);
+  assert.equal(watcher.preconditions('kill_lingering', baseFacts({
+    heartbeat: { pid: 10, nonce: 'abc', stage: 'stopped' }, stoppedForMs: 6 * 60 * 1000, cpuRatio: 0, children: [],
+  })).ok, true);
+  assert.equal(watcher.preconditions('kill_lingering', baseFacts({
+    heartbeat: { pid: 10, nonce: 'abc', stage: 'stopped' }, stoppedForMs: 6 * 60 * 1000, cpuRatio: 0, children: [{ name: 'claude.exe' }],
+  })).ok, false);
+  assert.equal(watcher.preconditions('recover', { unsafe: { pids: [{ alive: false }], sandboxNewerThanStop: false } }).ok, true);
+  assert.equal(watcher.preconditions('recover', { unsafe: { pids: [{ alive: true }], sandboxNewerThanStop: false } }).ok, false);
+  assert.equal(watcher.preconditions('probe_coders', {}, {}).ok, true);
+  assert.equal(watcher.preconditions('probe_coders', { incident: 'x' }, { probed: { x: true } }).ok, false);
+  assert.equal(watcher.preconditions('stop_and_report', {}).ok, true);
+  assert.equal(watcher.preconditions('reset_stub', { loopStopped: true, stubCommits: 0, stubRemote: false, taskId: '123' }).ok, true);
+  assert.equal(watcher.preconditions('reset_stub', { loopStopped: false, stubCommits: 0, stubRemote: false, taskId: '123' }).ok, false);
+  assert.equal(watcher.preconditions('bench_coder', { coderCreditExhausted: true, coderName: 'grok' }).ok, true);
+  assert.equal(watcher.preconditions('bench_coder', { coderCreditExhausted: false, coderName: 'grok' }).ok, false);
+  assert.equal(watcher.preconditions('rm_rf', {}).ok, false);
+  assert.equal(alive.lock.pid, 10);
+
+  assert.equal(watcher.parseClaudeVerdict('nope').ok, false);
+  assert.equal(watcher.parseClaudeVerdict('{"action":"rm_rf","confidence":1}').reason, 'unknown action');
+  assert.equal(watcher.parseClaudeVerdict('{"action":"wait","confidence":0.2}').reason, 'low confidence');
+  const parsed = watcher.parseClaudeVerdict('note {"diagnosis":"d","action":"wait","confidence":0.8,"why":"w","human_fix":"h"} tail');
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.action, 'wait');
+  assert.equal(parsed.humanFix, 'h');
+
+  const probe = watcher.probePlan('probe');
+  assert.equal(probe.find(item => item.name === 'codex').command, 'codex login status');
+  assert.equal(probe.find(item => item.name === 'claude').input, 'Reply with exactly: OK');
+  assert.equal(probe.find(item => item.name === 'claude').command, 'claude -p --model sonnet');
+  const reviewPlan = watcher.probePlan('review');
+  assert.ok(reviewPlan.find(item => item.name === 'codex').command.includes('codex exec'));
+  assert.equal(reviewPlan.find(item => item.name === 'grok').promptFile, true);
+
+  const killed = stamp(NOW, '123 grok phase: wall 2:10 killed-idle');
+  assert.equal(watcher.coderWasActiveBeforeKill([killed], NOW - 30_000), true);
+  assert.equal(watcher.coderWasActiveBeforeKill([killed], NOW - 120_000), false);
+  assert.equal(watcher.coderWasActiveBeforeKill([killed], NOW + 1000), false);
+
+  const p1 = decide(wedge());
+  assert.equal(p1.row, 'P1');
+  assert.equal(p1.action, 'kill_and_recover');
+  assert.equal(p1.effects.kill, true);
+  assert.equal(p1.effects.clearLock, true);
+  assert.equal(p1.effects.clearStop, true);
+  assert.equal(p1.effects.start, true);
+
+  const wrongNonce = decide(wedge({ lock: { pid: 10, nonce: 'OTHER' } }));
+  assert.equal(wrongNonce.row, 'P1');
+  assert.equal(wrongNonce.effects.kill, false);
+  assert.equal(wrongNonce.effects.start, false);
+  assert.ok(wrongNonce.refused);
+
+  const longVerify = decide({
+    heartbeat: { pid: 10, nonce: 'abc', stage: 'verify', pass: 2 },
+    heartbeatAgeMs: 1_800_000,
+    cpuRatio: 1,
+    ioUnchanged: true,
+    children: [],
+  });
+  assert.equal(longVerify.row, null);
+
+  const nullChildren = decide(wedge({ children: null, cpuRatio: 1 }));
+  assert.notEqual(nullChildren.row, 'P1');
+  assert.equal(nullChildren.effects.kill, false);
+
+  const p2 = decide({
+    heartbeat: { pid: 10, nonce: 'abc', stage: 'stopped', pass: 1 },
+    stoppedForMs: 6 * 60 * 1000,
+    cpuRatio: 0.05,
+    children: [{ name: 'cmd.exe' }],
+    lastLogLine: stamp(NOW, 'Safe Stop complete: tree clean'),
+  });
+  assert.equal(p2.row, 'P2');
+  assert.equal(p2.action, 'kill_lingering');
+  assert.equal(p2.effects.kill, true);
+  assert.equal(p2.effects.start, false);
+  assert.equal(p2.effects.clearStop, true);
+
+  const p2early = decide({
+    heartbeat: { pid: 10, nonce: 'abc', stage: 'stopped', pass: 1 },
+    stoppedForMs: 60 * 1000,
+    cpuRatio: 0,
+    children: [],
+  });
+  assert.notEqual(p2early.row, 'P2');
+  const p2agent = decide({
+    heartbeat: { pid: 10, nonce: 'abc', stage: 'stopped', pass: 1 },
+    stoppedForMs: 6 * 60 * 1000,
+    cpuRatio: 0,
+    children: [{ name: 'claude.exe' }],
+  });
+  assert.notEqual(p2agent.row, 'P2');
+
+  const p3 = decide({ lockExists: true, lockPidAlive: false, pidAlive: false });
+  assert.equal(p3.row, 'P3');
+  assert.equal(p3.action, 'clear_stale_lock');
+  assert.equal(p3.effects.clearLock, true);
+  assert.equal(p3.effects.start, false);
+  const mismatch = decide({ lock: { pid: 10, nonce: 'OTHER' }, lockPidAlive: true });
+  assert.equal(mismatch.row, 'P3');
+  assert.equal(mismatch.response, 'NOTIFY');
+  assert.equal(mismatch.effects.clearLock, false);
+  assert.equal(decide().row, null);
+
+  let fixes = watcher.emptyMemory();
+  let limited;
+  for (let i = 0; i < 3; i++) {
+    limited = decide({ lockExists: true, lockPidAlive: false, pidAlive: false, now: NOW + i }, fixes);
+    fixes = limited.memory;
+  }
+  assert.equal(limited.action, 'stop_and_report');
+  assert.equal(limited.effects.start, false);
+
+  const p4 = decide({
+    lockExists: false,
+    lockPidAlive: false,
+    pidAlive: false,
+    unsafe: { pids: [{ pid: 4, alive: false }], sandboxNewerThanStop: false },
+    pass: 1,
+  });
+  assert.equal(p4.action, 'recover');
+  assert.equal(p4.effects.recover, true);
+  assert.equal(p4.effects.start, true);
+  const held = decide({
+    lockExists: false,
+    lockPidAlive: false,
+    pidAlive: false,
+    unsafe: { pids: [{ pid: 4, alive: false }], sandboxNewerThanStop: false },
+    pass: 2,
+  }, p4.memory);
+  assert.equal(held.row, null);
+  const p4stop = decide({
+    lockExists: false,
+    unsafe: { pids: [{ pid: 4, alive: true }], sandboxNewerThanStop: false },
+  });
+  assert.equal(p4stop.response, 'STOP');
+  assert.equal(p4stop.effects.recover, false);
+  const p4file = decide({
+    lockExists: false,
+    unsafe: { pids: [{ pid: 4, alive: false }], sandboxNewerThanStop: true },
+  });
+  assert.equal(p4file.response, 'STOP');
+  const lockFirst = decide({
+    lockExists: true,
+    lockPidAlive: false,
+    pidAlive: false,
+    unsafe: { pids: [{ pid: 4, alive: false }], sandboxNewerThanStop: false },
+  });
+  assert.equal(lockFirst.row, 'P3');
+
+  const stub = stamp(NOW, 'REFUSING fresh fork of 123: branch agent-loop/task-a-123 already exists (0 commit(s) beyond main)');
+  const elig = stamp(NOW, 'no ready task is eligible: 2 blocked by unfinished predecessors');
+  const p5 = decide({ lines: [stub, elig, elig] });
+  assert.equal(p5.row, 'P5');
+  assert.equal(p5.response, 'NOTIFY');
+  assert.equal(p5.effects.start, false);
+  assert.ok(p5.report.includes('git rev-list --count'));
+  const p5auto = decide({
+    lines: [stub, elig, elig],
+    phase2: true,
+    loopStopped: true,
+    stubCommits: 0,
+    stubRemote: false,
+    lockExists: false,
+    lockPidAlive: false,
+    pidAlive: false,
+  });
+  assert.equal(p5auto.action, 'reset_stub');
+  assert.equal(p5auto.taskId, '123');
+  assert.notEqual(decide({ lines: [stub, elig] }).row, 'P5');
+  assert.notEqual(decide({
+    lines: [
+      stamp(NOW, 'REFUSING fresh fork of 123: branch agent-loop/task-a-123 already exists (2 commit(s) beyond main)'),
+      elig, elig,
+    ],
+  }).row, 'P5');
+
+  const buf = Buffer.from([stub, elig, elig].join('\n') + '\n');
+  const firstChunk = watcher.readNewLog(buf, 0);
+  assert.equal(decide({ lines: firstChunk.lines, nextOffset: firstChunk.nextOffset }).row, 'P5');
+  const secondChunk = watcher.readNewLog(buf, firstChunk.nextOffset);
+  assert.deepEqual(secondChunk.lines, []);
+  assert.notEqual(decide({ lines: secondChunk.lines, nextOffset: secondChunk.nextOffset }).row, 'P5');
+
+  const p6 = decide({
+    lines: [stamp(NOW, 'REFUSING fresh fork of 123: satisfied blockers still carry unmerged branches')],
+  });
+  assert.equal(p6.row, 'P6');
+  assert.equal(p6.response, 'NOTIFY');
+  assert.ok(p6.report.includes('ancestry'));
+
+  const p7 = decide({
+    lines: [
+      stamp(NOW, 'implement 123 "Task A" via grok (fixing) [isolated clone]'),
+      stamp(NOW + 400, 'task branch missing for a fix → blocked'),
+    ],
+  });
+  assert.equal(p7.row, 'P7');
+  assert.equal(p7.response, 'NOTIFY');
+  assert.notEqual(decide({
+    lines: [
+      stamp(NOW, 'implement 123 "Task A" via grok (fixing) [isolated clone]'),
+      stamp(NOW + 5000, 'task branch missing for a fix → blocked'),
+    ],
+  }).row, 'P7');
+  assert.notEqual(decide({
+    lines: [stamp(NOW, 'task branch missing for a fix → blocked')],
+  }).row, 'P7');
+
+  const credit = 'HTTP 402 payment required';
+  const p8notify = decide({
+    lines: [
+      stamp(NOW, 'probe grok: available'),
+      stamp(NOW, 'probe claude: available'),
+      stamp(NOW + 2000, '123 grok exited 1 → round 1/5'),
+    ],
+    coderLogText: credit,
+  });
+  assert.equal(p8notify.row, 'P8');
+  assert.equal(p8notify.response, 'NOTIFY');
+  const p8stop = decide({
+    lines: [
+      stamp(NOW, 'probe grok: available'),
+      stamp(NOW, 'probe claude: unavailable'),
+      stamp(NOW + 2000, '123 grok exited 1 → round 1/5'),
+    ],
+    coderLogText: 'balance exhausted',
+  });
+  assert.equal(p8stop.response, 'STOP');
+  const p8explicit = decide({
+    lines: [
+      stamp(NOW, 'probe grok: available'),
+      stamp(NOW + 2000, '123 grok exited 1 → round 1/5'),
+    ],
+    coderLogText: credit,
+    onlyWorkingCoder: false,
+  });
+  assert.equal(p8explicit.response, 'NOTIFY');
+  assert.notEqual(decide({
+    lines: [
+      stamp(NOW, 'probe grok: available'),
+      stamp(NOW + 2000, '123 grok exited 1 → round 1/5'),
+    ],
+    coderLogText: 'ordinary crash',
+  }).row, 'P8');
+  const p8bench = decide({
+    phase2: true,
+    lines: [
+      stamp(NOW, 'probe grok: available'),
+      stamp(NOW, 'probe claude: available'),
+      stamp(NOW + 2000, '123 grok exited 1 → round 1/5'),
+    ],
+    coderLogText: credit,
+  });
+  assert.equal(p8bench.action, 'bench_coder');
+  assert.equal(p8bench.effects.notify, true);
+  assert.equal(p8bench.coderName, 'grok');
+
+  const shortWait = decide({
+    now: atLocal(10, 5),
+    lines: [stamp(atLocal(10, 0), 'claude unavailable: try again at 10:30 AM')],
+  });
+  assert.equal(shortWait.row, 'P9');
+  assert.equal(shortWait.response, 'WAIT');
+  const escalated = decide({
+    now: atLocal(10, 20),
+    lines: [stamp(atLocal(9, 30), 'claude unavailable: try again at 10:00 AM')],
+  });
+  assert.equal(escalated.row, 'P9');
+  assert.equal(escalated.response, 'STOP');
+  assert.ok(escalated.report.includes('10:00 AM'));
+  const longQuota = decide({
+    lines: [stamp(NOW, 'claude unavailable: try again at Sep 22nd, 2026 7:49 PM')],
+  });
+  assert.equal(longQuota.response, 'STOP');
+  assert.ok(longQuota.report.includes('Sep 22nd, 2026 7:49 PM'));
+  assert.notEqual(decide({
+    now: atLocal(10, 10),
+    lines: [
+      stamp(atLocal(10, 0), 'claude unavailable: try again at 10:30 AM'),
+      stamp(atLocal(10, 2), 'probe claude: available'),
+    ],
+  }).row, 'P9');
+  const quietWait = decide({
+    now: atLocal(10, 5),
+    lines: [stamp(atLocal(9, 30), 'claude unavailable: try again at 10:00 AM')],
+  });
+  assert.equal(quietWait.response, 'WAIT');
+  const brokeQuiet = decide({
+    now: atLocal(10, 12),
+    lines: [stamp(atLocal(9, 30), 'claude unavailable: try again at 10:00 AM')],
+  }, quietWait.memory);
+  assert.equal(brokeQuiet.response, 'STOP');
+  assert.equal(brokeQuiet.quiet, false);
+  assert.equal(brokeQuiet.effects.writeStopFlag, true);
+
+  const parked = {
+    heartbeatAgeMs: 30_000,
+    children: [{ name: 'powershell.exe' }],
+    lines: [
+      stamp(NOW, '123 on review left parked (Codex down; coded by grok)'),
+      stamp(NOW, 'no ready task is eligible: 1 blocked by unfinished predecessors'),
+    ],
+  };
+  const p10 = decide(parked);
+  assert.equal(p10.row, 'P10');
+  assert.equal(p10.response, 'WAIT');
+  assert.equal(p10.effects.kill, false);
+  const p10quiet = decide({ ...parked, now: NOW + 60_000 }, p10.memory);
+  assert.equal(p10quiet.quiet, true);
+  assert.notEqual(decide({ ...parked, heartbeatAgeMs: 5 * 60 * 1000 }).row, 'P10');
+
+  const stopCoder = stamp(NOW, 'STOP: no coder available');
+  const p11 = decide({ lines: [stopCoder, stopCoder, stopCoder] });
+  assert.equal(p11.row, 'P11');
+  assert.equal(p11.action, 'probe_coders');
+  assert.equal(p11.probeMode, 'probe');
+  assert.equal(p11.effects.writeStopFlag, true);
+  assert.equal(p11.effects.start, false);
+  assert.notEqual(decide({ lines: [stopCoder, stopCoder] }).row, 'P11');
+
+  const t0 = NOW;
+  const p12 = decide({
+    lines: [
+      stamp(t0, 'probe claude: available'),
+      stamp(t0, 'review 123 via claude (10 diff lines vs main) [worktree]'),
+      stamp(t0 + 1000, '123 claude unavailable (exit 1) → left in review'),
+      stamp(t0 + 20_000, 'review 123 via claude (10 diff lines vs main) [worktree]'),
+      stamp(t0 + 21_000, '123 claude unavailable (exit 1) → left in review'),
+    ],
+  });
+  assert.equal(p12.row, 'P12');
+  assert.equal(p12.probeMode, 'review');
+  assert.equal(p12.effects.writeStopFlag, true);
+  assert.notEqual(decide({
+    lines: [
+      stamp(t0, 'probe claude: available'),
+      stamp(t0, 'review 123 via claude (10 diff lines vs main) [worktree]'),
+      stamp(t0 + 30_000, '123 claude unavailable (exit 1)'),
+      stamp(t0 + 40_000, 'review 123 via claude (10 diff lines vs main) [worktree]'),
+      stamp(t0 + 80_000, '123 claude unavailable (exit 1)'),
+    ],
+  }).row, 'P12');
+
+  const p13fast = decide({
+    lines: [
+      stamp(t0, '123 verify: npm test @ abcdef12'),
+      stamp(t0 + 1000, '123 verify FAILED (round 1/3)'),
+      stamp(t0 + 20_000, '123 verify: npm test @ abcdef12'),
+      stamp(t0 + 21_000, '123 verify FAILED (round 2/3)'),
+    ],
+  });
+  assert.equal(p13fast.row, 'P13');
+  assert.equal(p13fast.response, 'STOP');
+  const cycle = [
+    stamp(t0, '123 verify FAILED (round 1/3)'),
+    stamp(t0 + 60_000, '123 verify FAILED (round 2/3)'),
+    stamp(t0 + 120_000, '123 verify FAILED (round 3/3)'),
+  ];
+  assert.equal(decide({ lines: cycle, commitCounts: { '123': [4, 4, 4] } }).row, 'P13');
+  assert.notEqual(decide({ lines: cycle, commitCounts: { '123': [4, 5, 6] } }).row, 'P13');
+  assert.notEqual(decide({ lines: cycle }).row, 'P13');
+
+  const turns = [
+    stamp(t0, '123 grok exited 1 (max turns reached) → round 1/5'),
+    stamp(t0 + 1000, '123 grok exited 1 (max turns reached) → round 2/5'),
+  ];
+  const p14 = decide({ lines: turns });
+  assert.equal(p14.row, 'P14');
+  assert.equal(p14.response, 'NOTIFY');
+  assert.ok(p14.report.includes('AGENT_LOOP_MAX_TURNS'));
+  assert.notEqual(decide({ lines: turns, commitsGrew: { '123': true } }).row, 'P14');
+
+  const scope = stamp(NOW, '123 Claude re-scope diagnosis');
+  assert.equal(decide({ lines: [scope, stamp(NOW + 1000, '123 Claude re-scope diagnosis')] }).response, 'NOTIFY');
+  assert.equal(decide({
+    lines: [scope, stamp(NOW + 1000, '123 Claude re-scope diagnosis'), stamp(NOW + 2000, '123 Claude re-scope diagnosis')],
+  }).response, 'STOP');
+  assert.notEqual(decide({
+    lines: [
+      stamp(NOW - 25 * 60 * 60 * 1000, '123 Claude re-scope diagnosis'),
+      stamp(NOW - 25 * 60 * 60 * 1000 + 1000, '123 Claude re-scope diagnosis'),
+    ],
+  }).row, 'P15');
+
+  const p16 = decide({
+    configuredSeedCount: 2,
+    lines: [
+      stamp(NOW, '=== start: watch'),
+      stamp(NOW, 'seed skipped: tests/a does not exist in primary'),
+      stamp(NOW, 'seed skipped: tests/b does not exist in primary'),
+    ],
+  });
+  assert.equal(p16.row, 'P16');
+  assert.equal(p16.response, 'STOP');
+  const branched = decide({
+    configuredSeedCount: 1,
+    lines: [
+      stamp(NOW, '=== start: watch'),
+      stamp(NOW, 'seed skipped: tests/a does not exist in primary'),
+      stamp(NOW, 'implement 123 "Task A" via grok [isolated clone]'),
+    ],
+  });
+  assert.equal(branched.row, 'P16');
+  assert.ok(branched.report.includes('branch was created'));
+  assert.notEqual(decide({
+    configuredSeedCount: 2,
+    lines: [
+      stamp(NOW, '=== start: watch'),
+      stamp(NOW, 'seed skipped: tests/a does not exist in primary'),
+    ],
+  }).row, 'P16');
+  assert.notEqual(decide({
+    configuredSeedCount: 2,
+    lines: [
+      stamp(NOW, '=== start: watch'),
+      stamp(NOW, 'seed skipped: tests/a does not exist in primary'),
+      stamp(NOW, 'seed skipped: tests/a does not exist in primary'),
+    ],
+  }).row, 'P16');
+  assert.notEqual(decide({
+    configuredSeedCount: 1,
+    lines: [
+      stamp(NOW, '=== start: watch'),
+      stamp(NOW, 'verify seed skipped: tests/a does not exist in primary'),
+    ],
+  }).row, 'P16');
+  assert.notEqual(decide({
+    lines: [
+      stamp(NOW, '=== start: watch'),
+      stamp(NOW, 'seed skipped: tests/a does not exist in primary'),
+    ],
+  }).row, 'P16');
+
+  const idleKill = stamp(NOW, '123 grok phase: first-write 1:00 last-write 2:00 wall 2:10 killed-idle');
+  const p17 = decide({
+    coderActiveBeforeKill: true,
+    lines: [idleKill, stamp(NOW + 1000, '123 grok phase: first-write 1:00 last-write 2:00 wall 2:10 killed-idle')],
+  });
+  assert.equal(p17.row, 'P17');
+  assert.equal(p17.response, 'NOTIFY');
+  assert.ok(p17.report.includes('AGENT_LOOP_IMPLEMENT_IDLE_S'));
+  assert.notEqual(decide({ coderActiveBeforeKill: false, lines: [idleKill, idleKill] }).row, 'P17');
+  assert.notEqual(decide({ coderActiveBeforeKill: true, lines: [idleKill] }).row, 'P17');
+
+  const userStop = decide({
+    ...wedge(),
+    stopFlag: 'requested 2026-10-22T11:00:00.000Z from the Agent Loop button\n',
+  });
+  assert.equal(userStop.row, 'user-stop');
+  assert.equal(userStop.effects.start, false);
+  assert.equal(userStop.effects.kill, false);
+  assert.equal(userStop.effects.writeStopFlag, false);
+  const watcherStop = decide({
+    stopFlag: watcher.watcherStopText(new Date(NOW)),
+    lockExists: true,
+    lockPidAlive: false,
+  });
+  assert.equal(watcherStop.row, 'watcher-stop');
+  assert.equal(watcherStop.effects.start, false);
+  assert.equal(watcherStop.effects.clearLock, false);
+  const userLinger = decide({
+    stopFlag: 'requested 2026-10-22T11:00:00.000Z from the Agent Loop button\n',
+    heartbeat: { pid: 10, nonce: 'abc', stage: 'stopped', pass: 1 },
+    stoppedForMs: 6 * 60 * 1000,
+    cpuRatio: 0.01,
+    children: [],
+    lastLogLine: stamp(NOW, 'Safe Stop complete: tree clean'),
+  });
+  assert.equal(userLinger.row, 'P2');
+  assert.equal(userLinger.effects.kill, true);
+  assert.equal(userLinger.effects.start, false);
+
+  const frozen = {
+    heartbeat: { pid: 10, nonce: 'abc', stage: 'idle', pass: 1 },
+    heartbeatAgeMs: 1_300_000,
+    cpuRatio: null,
+    ioUnchanged: null,
+    children: null,
+    claudeMode: 'full',
+  };
+  const ask = decide(frozen);
+  assert.equal(ask.row, 'P18');
+  assert.equal(ask.needsClaude, true);
+  assert.ok(ask.bundle.allowlist.some(item => item.id === 'stop_and_report'));
+  const down = decide(frozen, watcher.emptyMemory(), { unavailable: true, why: 'timeout' });
+  assert.equal(down.action, 'stop_and_report');
+  assert.ok(down.report.includes('unavailable'));
+  assert.ok(down.report.includes('timeout'));
+  assert.equal(decide(frozen, watcher.emptyMemory(), { text: 'not json' }).action, 'stop_and_report');
+  assert.equal(decide(frozen, watcher.emptyMemory(), {
+    text: '{"diagnosis":"x","action":"rm_rf","confidence":0.99,"why":"y","human_fix":"z"}',
+  }).action, 'stop_and_report');
+  assert.equal(decide(frozen, watcher.emptyMemory(), {
+    text: '{"diagnosis":"x","action":"wait","confidence":0.4,"why":"y","human_fix":"z"}',
+  }).action, 'stop_and_report');
+  const waited = decide(frozen, watcher.emptyMemory(), {
+    text: '{"diagnosis":"cooling down","action":"wait","confidence":0.91,"why":"short","human_fix":"leave it"}',
+  });
+  assert.equal(waited.action, 'wait');
+  assert.ok(waited.report.includes('leave it'));
+  const rejected = decide(frozen, watcher.emptyMemory(), {
+    text: '{"diagnosis":"stale","action":"clear_stale_lock","confidence":0.95,"why":"lock","human_fix":"delete"}',
+  });
+  assert.equal(rejected.action, 'stop_and_report');
+  assert.ok(rejected.refused);
+  const playbookOnly = decide({ ...frozen, claudeMode: 'playbook' });
+  assert.equal(playbookOnly.needsClaude, false);
+  assert.equal(playbookOnly.action, 'stop_and_report');
+  assert.ok(playbookOnly.report.includes('not on PATH'));
+  const cappedMem = watcher.emptyMemory();
+  cappedMem.claudeCalls = [NOW - 1, NOW - 2, NOW - 3, NOW - 4];
+  const capped = decide(frozen, cappedMem);
+  assert.equal(capped.needsClaude, false);
+  assert.ok(capped.report.includes('hourly'));
+
+  let repeats = watcher.emptyMemory();
+  let repeated;
+  for (let i = 0; i < 3; i++) {
+    repeated = decide({
+      lines: [stamp(NOW + i * 1000, `FATAL disk full on the runner ${i}`)],
+      heartbeatAgeMs: 1000,
+      claudeMode: 'full',
+    }, repeats, { unavailable: true, why: 'timeout' });
+    repeats = repeated.memory;
+  }
+  assert.equal(repeated.row, 'P18');
+  assert.equal(repeated.response, 'NOTIFY');
+  assert.notEqual(repeated.action, 'stop_and_report');
+  let twice = watcher.emptyMemory();
+  let notYet;
+  for (let i = 0; i < 2; i++) {
+    notYet = decide({
+      lines: [stamp(NOW, 'FATAL disk full on the runner 7')],
+      heartbeatAgeMs: 1000,
+    }, twice);
+    twice = notYet.memory;
+  }
+  assert.equal(notYet.row, null);
+
+  const again = decide({ lines: [stub, elig, elig] }, p5.memory);
+  assert.equal(again.effects.notify, false);
+  assert.equal(again.row, 'P5');
+
+  const exe = process.execPath.includes(' ') ? `"${process.execPath}"` : process.execPath;
+  const echoed = await watcher.spawnCaptured(
+    `${exe} -e "process.stdin.pipe(process.stdout)"`,
+    { input: 'hello pk_123456_ABC', timeoutMs: 15_000 },
+  );
+  assert.equal(echoed.ok, true, echoed.why || echoed.err);
+  assert.ok(echoed.text.includes('hello'));
+  assert.ok(echoed.text.includes('pk_[redacted]'));
+  assert.equal(echoed.text.includes('pk_123456'), false);
+}
+
+watcherChecks().then(() => {
+  console.log('agent-loop selftest: OK');
+}).catch(err => {
+  console.error(err);
+  process.exit(1);
+});

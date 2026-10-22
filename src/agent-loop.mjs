@@ -126,6 +126,9 @@
  *   omitted if missing — this script itself carries no project-specific instructions),
  *   AGENT_LOOP_POLL (watch interval s, default 60), AGENT_LOOP_MAX_ROUNDS (default 5),
  *   AGENT_LOOP_HEARTBEAT_S (terminal progress tick during long agent stages, default 30, 0=off),
+ *   AGENT_LOOP_HEARTBEAT_FILE (liveness file the extension watcher reads; default
+ *   ~/.agent-loop-heartbeat.json — written on stage changes and on that same tick, never from
+ *   the lock timer, because a lock mtime can keep moving after the pass loop has stopped),
  *   AGENT_LOOP_IMPLEMENT_TIMEOUT_S (default 1200, absolute ceiling) /
  *   AGENT_LOOP_IMPLEMENT_IDLE_S (default 480; no output, no writes, and no CPU growth; 0 = wall-clock only) / _REVIEW_TIMEOUT_S (600) /
  *   _VERIFY_TIMEOUT_S (1500) — raise the verify cap for a slow full-suite gate,
@@ -157,6 +160,7 @@ import { randomUUID } from 'node:crypto';
 import { writeFileSync, mkdtempSync, appendFileSync, existsSync, readFileSync, unlinkSync, rmSync, renameSync, statSync, utimesSync, cpSync, watch, mkdirSync, symlinkSync, linkSync, readdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve as pathResolve, sep as pathSep, normalize as pathNormalize, dirname, win32 as pathWin32, posix as pathPosix } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ---------- args ----------
 const argv = process.argv.slice(2);
@@ -347,7 +351,15 @@ const CMD = {
 
 // ---------- audit log (gitignored) ----------
 const LOG_FILE = process.env.AGENT_LOOP_LOG || `${homedir()}/.agent-loop.log`;
-const log = msg => { const line = `[${new Date().toISOString()}] ${msg}`; console.log(line); try { appendFileSync(LOG_FILE, line + '\n'); } catch {} };
+// The heartbeat file records when a log line was written. Assigned once the heartbeat state exists
+// (further down); calling it before that is a no-op so early config errors still log.
+let rememberLogTime = () => {};
+const log = msg => {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  rememberLogTime();
+  console.log(line);
+  try { appendFileSync(LOG_FILE, line + '\n'); } catch {}
+};
 
 // ---------- verdict parser (string-aware brace scan) ----------
 export function extractVerdict(out) {
@@ -1366,13 +1378,41 @@ async function selftest() {
     try { unlinkSync(probeLog); } catch {}
   }
 
+  // Heartbeat file: temp + rename, then stage stopped. Never the real home path.
+  let heartbeatFileProbe = false;
+  const hbDir = mkdtempSync(join(tmpdir(), 'al-hb-'));
+  try {
+    const hbFile = join(hbDir, 'heartbeat.json');
+    const tmpName = `${hbFile}.${process.pid}.tmp`;
+    const wrote = writeHeartbeat('verify', { file: hbFile });
+    const parsed = JSON.parse(readFileSync(hbFile, 'utf8'));
+    const tick = Date.now() + 5;
+    while (Date.now() < tick) { /* stageSince must move even inside one millisecond */ }
+    const stopped = writeHeartbeat(null, { file: hbFile, stopped: true });
+    const parsedStopped = JSON.parse(readFileSync(hbFile, 'utf8'));
+    heartbeatFileProbe = wrote?.stage === 'verify'
+      && parsed.stage === 'verify'
+      && parsed.pid === process.pid
+      && parsed.nonce === LOCK_OWNER.nonce
+      && parsed.version === LOOP_VERSION
+      && !existsSync(tmpName)
+      && stopped?.stage === 'stopped'
+      && parsedStopped.stage === 'stopped'
+      && parsedStopped.stageSince !== parsed.stageSince;
+    if (!heartbeatFileProbe) console.log('  heartbeat-file probe: failed', { parsed, parsedStopped, tmpLeft: existsSync(tmpName) });
+  } catch (e) {
+    console.log('  heartbeat-file probe: failed', e.message);
+  } finally {
+    try { rmSync(hbDir, { recursive: true, force: true }); } catch {}
+  }
+
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
     && cuRetryClass && quotaReset && benchProbe && lockfileFilter && attribution && cpuLiveness && cpuBusySurvives
     && c && d && e && implementCap && idleCap && idleDeadline && idleLive && budgetProbe && phaseProbe && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w
     && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && rescopeBudget && chainBaseSelection && parkedReviewRouting && rollup
     && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication
-    && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe && winJobShutdown;
-  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} benchProbe=${benchProbe} lockfileFilter=${lockfileFilter} attribution=${attribution} winJobShutdown=${winJobShutdown})`);
+    && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe && winJobShutdown && heartbeatFileProbe;
+  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} benchProbe=${benchProbe} lockfileFilter=${lockfileFilter} attribution=${attribution} winJobShutdown=${winJobShutdown} heartbeatFile=${heartbeatFileProbe})`);
   process.exit(good ? 0 : 1);
 }
 
@@ -1507,6 +1547,63 @@ function parseLockRecord(raw) {
   } catch { return null; }
 }
 const LOCK_OWNER = makeLockOwner();
+
+// Liveness file for the extension watcher. The lock file's mtime is the ownership heartbeat and
+// keeps moving even after the pass loop has stopped, so it cannot answer "is the loop frozen?".
+// This file is written only when the pass loop changes stage and from the stage runner's existing
+// progress tick — never from touchLock's timer. --selftest does not write the default path.
+const HEARTBEAT_FILE = () => process.env.AGENT_LOOP_HEARTBEAT_FILE || join(homedir(), '.agent-loop-heartbeat.json');
+const LOOP_VERSION = (() => {
+  try {
+    const pkg = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    return JSON.parse(readFileSync(pkg, 'utf8')).version || '0';
+  } catch { return '0'; }
+})();
+const HEARTBEAT_STAGES = new Set(['idle', 'probe', 'implement', 'review', 'adjudicate', 'verify', 'land', 'stopping', 'stopped']);
+let hbStage = 'idle';
+let hbStageSince = new Date().toISOString();
+let hbLastLogAt = null;
+let hbPass = 0;
+rememberLogTime = () => { hbLastLogAt = new Date().toISOString(); };
+function stageFromLabel(label) {
+  const s = String(label || '').toLowerCase();
+  if (s.includes('verify')) return 'verify';
+  if (s.includes('adjudicat')) return 'adjudicate';
+  if (s.includes('review')) return 'review';
+  if (s.includes('implement')) return 'implement';
+  if (s.includes('re-scope') || s.includes('rescope')) return 'review';
+  if (s.includes('land')) return 'land';
+  if (s.includes('probe')) return 'probe';
+  return null;
+}
+// Atomic replace: a reader never sees a half-written file. `file` is set by the selftest probe;
+// a normal --selftest run passes neither and writes nothing.
+function writeHeartbeat(stage, opt = {}) {
+  const dest = opt.file || (opts.selftest ? null : HEARTBEAT_FILE());
+  if (!dest) return null;
+  if (opt.stopped) {
+    hbStage = 'stopped';
+    hbStageSince = new Date().toISOString();
+  } else if (stage && HEARTBEAT_STAGES.has(stage) && stage !== hbStage) {
+    hbStage = stage;
+    hbStageSince = new Date().toISOString();
+  }
+  const body = {
+    pid: process.pid,
+    nonce: LOCK_OWNER.nonce,
+    stage: hbStage,
+    stageSince: hbStageSince,
+    lastLogAt: hbLastLogAt,
+    pass: hbPass,
+    version: LOOP_VERSION,
+  };
+  const tmp = `${dest}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(body));
+  renameSync(tmp, dest);
+  return body;
+}
+function notePass() { hbPass += 1; }
+
 const readLockRecord = () => {
   try { return parseLockRecord(readFileSync(LOCK_FILE, 'utf8')); }
   catch { return null; }
@@ -2515,10 +2612,13 @@ function runProc(cmd, { input, timeout, idleTimeout, progressDir, label, cwd, en
     let lastCpuMs = null, cpuUnmeasured = false;
     const OUTPUT_CAP = 8 * 1024 * 1024;
     const t0 = Date.now(), hb = heartbeatMs();
+    const stage = stageFromLabel(label);
+    if (stage) writeHeartbeat(stage);
     const tick = label && hb > 0 ? setInterval(() => {
       const cap = timeout ? `/${mmss(timeout)}` : '';
       const idle = idleTimeout ? ` idle ${mmss(Date.now() - lastProgressAt)}/${mmss(idleTimeout)}` : '';
       console.log(`   … ${label} ${mmss(Date.now() - t0)}${cap}${idle}${tail ? ` — ${tail.slice(0, 110)}` : ''}`);
+      if (stage) writeHeartbeat(stage);
     }, hb) : null;
     const done = r => {
       if (settled) return;                       // a tree-kill still fires 'close' afterwards — ignore it
@@ -3153,6 +3253,7 @@ export function omitLockfileDiffs(diff) {
 }
 
 async function probe(who) {
+  writeHeartbeat('probe');
   const until = QUOTA_UNTIL.get(who);
   if (until && Date.now() < until) {
     log(`  probe ${who}: unavailable (quota/cooldown — skipping probe until ${new Date(until).toISOString()})`);
@@ -3467,11 +3568,19 @@ async function implement(t, coder) {
   }
 
   log(`implement ${id} "${t.name}" via ${coder}${fixing ? ' (fixing)' : ''} [isolated clone]`);
+  // Log the missing branch before any ClickUp write so the two lines share a timestamp. The
+  // status change is still coding, then blocked, which is the hand-off the watcher measures.
+  if (fixing && !branch) {
+    log(`task branch missing for a fix → blocked`);
+    await setStatus(id, S.coding);
+    await setStatus(id, S.blocked);
+    await tryComment(id, `🔵 task branch missing for a fix → **blocked**.`);
+    return false;
+  }
   await setStatus(id, S.coding);
 
   let wt;
   if (fixing) {
-    if (!branch) { await setStatus(id, S.blocked); await tryComment(id, `🔵 task branch missing for a fix → **blocked**.`); return false; }
     wt = await openTaskWorktree(branch);
     if (!wt.ok) {
       const rounds = bumpRounds(id);
@@ -4054,6 +4163,7 @@ async function waitForCi(sha) {
 }
 
 async function land(t, { branch, reviewedSha, reviewer = null }, escalateOnCap = false) {
+  writeHeartbeat('land');
   const id = t.id;
   if (!branch || !reviewedSha) throw new Error(`land(${id}): branch and reviewedSha are required`);
   // Never assert "Codex approved" — Codex-down landings are reviewed by Claude, and a commit record
@@ -4430,12 +4540,14 @@ async function writeStopReport(when) {
 }
 
 async function stopSafely(when, { consistent = true } = {}) {
+  writeHeartbeat('stopping');
   log(`🛑 SAFE STOP — stopping ${when}. Nothing was interrupted mid-flight.`);
   await writeStopReport(when);
   clearStop();
   log(consistent
     ? `🛑 Safe Stop complete: tree and board are consistent. The tree is yours; restart the button when done.`
     : `🛑 Safety stop complete: inspect the handover report and resolve the recorded tree/task state before restarting.`);
+  writeHeartbeat(null, { stopped: true });
 }
 
 function writeUnsafeStopReport(reason, rescue = null) {
@@ -4949,6 +5061,8 @@ async function main() {
   if (stopRequested()) { log(`(clearing a leftover Safe Stop flag at ${STOP_FILE})`); clearStop(); }
 
   do {
+    notePass();
+    writeHeartbeat('idle');
     touchLock();
     let outcome;
     try { outcome = await pass(); }
@@ -4960,6 +5074,7 @@ async function main() {
     if (process.exitCode) break;
     if (stopRequested()) { await stopSafely('after finishing the current round'); break; }
     if (opts.watch) {
+      writeHeartbeat('idle');
       console.log(`… sleeping ${POLL}s (watch)`);
       if (await sleepUntilNextPass(POLL)) { await stopSafely('while idle between rounds'); break; }
     }

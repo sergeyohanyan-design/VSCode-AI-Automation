@@ -56,6 +56,11 @@ Beyond the routing, the parts that matter in practice:
 - **Safe Stop.** Click the button while it runs and it finishes the round it is in, never
   interrupting an agent mid-task, writes a handover report, and exits with the tree and board
   consistent.
+- **Watcher.** While the loop runs, the extension watches a heartbeat file and the new log
+  lines. A known failure gets a fixed response (repair, wait, report, or Safe Stop). An unknown
+  frozen loop or a repeated unknown error is sent to headless Claude with no tools, and only an
+  allowlisted action can run. Your own Safe Stop is never restarted. The report is
+  `~/.agent-loop-watcher-report.md`.
 - **Reviewers only ever see the task's own work.** The review diff is taken from the merge base
   with the base branch, never from its moving tip. A hotfix landing on `main` while a task is open
   is not part of that task's diff, so no reviewer can fail a task for "reverting" work it never
@@ -152,7 +157,8 @@ what you don't need — two keys are required, everything else has a working def
 | **Board vocabulary** | all 8 status names, both custom field names, the never-pick-up column |
 | **Agent commands** | the full CLI invocation for each agent — change model, flags, or binary; the Codex availability check (default `codex login status`, no tokens); Codex reviews default to medium reasoning |
 | **Timing** | poll interval, churn cap, per-stage timeouts, implement idle-progress cap, CLI turn budget, opt-in forge check wait, retry policy |
-| **State files** | lock, stop flag, log, handover report, churn tally, rescue manifest |
+| **State files** | lock, stop flag, log, handover report, heartbeat, churn tally, rescue manifest |
+| **Watcher** | on/auto/off, poll, Claude command, fix cap, hourly Claude cap, report, log, offset file, coder log paths |
 
 Nothing about your board's vocabulary is hardcoded. If your workflow spells things differently,
 override the names; no code change is needed. `npm test` enforces this — a setting the dispatcher
@@ -171,6 +177,7 @@ reads but the example never documents fails the build.
 | **Agent Loop: Force Stop** | Kill now. May leave a task mid-implement; the next start recovers it. |
 | **Agent Loop: Open last handover report** | What the last Safe Stop left behind. |
 | **Agent Loop: Recover unsafe stop** | Commit preserved sandbox work after an unsafe-child stop, if no descendant is still alive. |
+| **Agent Loop: Open the watcher report** | What the watcher last decided, and what to do next. |
 
 ---
 

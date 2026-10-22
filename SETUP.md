@@ -287,6 +287,13 @@ When you want the repo back, click the button again for a **Safe Stop**: it
 finishes the round it is in, never interrupting an agent mid-flight, writes a
 handover report to `~/.agent-loop-stop-report.md`, and exits cleanly.
 
+While the loop runs, the extension also runs a watcher. It reads
+`~/.agent-loop-heartbeat.json` and new lines from `~/.agent-loop.log`. A known
+failure is repaired, waited out, reported, or stopped. An unknown one can be
+sent to `claude -p` with no tools. Set `AGENT_LOOP_WATCHER=off` to disable it.
+A report lands in `~/.agent-loop-watcher-report.md`. Your Safe Stop is left
+alone: the watcher does not start the loop again after you stop it.
+
 ---
 
 ## Troubleshooting
@@ -341,4 +348,6 @@ To clear by hand: delete `~/.agent-loop.unsafe` and `~/.agent-loop.lock` if the
 lock record carries `"unsafe":true`. Do not set `AGENT_LOOP_UNSAFE=1` — that
 env var is the **path** of the marker file, not a boolean clear-switch.
 
-The full audit log is `~/.agent-loop.log`.
+The full audit log is `~/.agent-loop.log`. Watcher decisions are in
+`~/.agent-loop-watcher.log`, and the last plain-language report is
+`~/.agent-loop-watcher-report.md` (**Agent Loop: Open the watcher report**).

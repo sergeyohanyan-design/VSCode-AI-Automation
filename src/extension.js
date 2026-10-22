@@ -13,11 +13,22 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const setup = require('./setup.js');
+const watcher = require('./watcher.js');
 
 const TERMINAL_NAME = 'Agent Loop';
 const DISPATCHER = path.join(__dirname, 'agent-loop.mjs');
 const CONFIG_EXAMPLE = path.join(__dirname, '..', 'agent-loop.env.example');
-const STATE_ENV_KEYS = new Set(['AGENT_LOOP_LOCK', 'AGENT_LOOP_STOP', 'AGENT_LOOP_STOP_REPORT']);
+const PKG = require('../package.json');
+// Non-secret keys only. CLICKUP_TOKEN and other credentials stay out of the extension host.
+const STATE_ENV_KEYS = new Set([
+  'AGENT_LOOP_LOCK', 'AGENT_LOOP_STOP', 'AGENT_LOOP_STOP_REPORT', 'AGENT_LOOP_LOG',
+  'AGENT_LOOP_HEARTBEAT_FILE', 'AGENT_LOOP_UNSAFE', 'AGENT_LOOP_BENCH_FILE',
+  'AGENT_LOOP_WATCHER', 'AGENT_LOOP_WATCHER_CMD', 'AGENT_LOOP_WATCHER_POLL_S',
+  'AGENT_LOOP_WATCHER_MAX_FIXES', 'AGENT_LOOP_WATCHER_MAX_CALLS_PER_H',
+  'AGENT_LOOP_WATCHER_REPORT', 'AGENT_LOOP_WATCHER_LOG', 'AGENT_LOOP_WATCHER_STATE',
+  'AGENT_LOOP_WATCHER_CODER_LOGS', 'AGENT_LOOP_IMPLEMENT_TIMEOUT_S',
+  'AGENT_LOOP_REVIEW_TIMEOUT_S', 'AGENT_LOOP_VERIFY_TIMEOUT_S', 'AGENT_LOOP_VERIFY_SEED_DIRS',
+]);
 
 // Read only the three state-path settings from the same env file as the dispatcher. Do not load
 // CLICKUP_TOKEN into the extension host: the launcher never needs that secret.
@@ -46,6 +57,26 @@ function resolveStatePaths(env, home = os.homedir()) {
     lock: statePath(env.AGENT_LOOP_LOCK, '.agent-loop.lock'),
     stop: statePath(env.AGENT_LOOP_STOP, '.agent-loop.stop'),
     report: statePath(env.AGENT_LOOP_STOP_REPORT, '.agent-loop-stop-report.md'),
+    log: statePath(env.AGENT_LOOP_LOG, '.agent-loop.log'),
+    heartbeat: statePath(env.AGENT_LOOP_HEARTBEAT_FILE, '.agent-loop-heartbeat.json'),
+    unsafe: statePath(env.AGENT_LOOP_UNSAFE, '.agent-loop.unsafe'),
+    bench: statePath(env.AGENT_LOOP_BENCH_FILE, '.agent-loop-bench.json'),
+    watcherReport: statePath(env.AGENT_LOOP_WATCHER_REPORT, '.agent-loop-watcher-report.md'),
+    watcherLog: statePath(env.AGENT_LOOP_WATCHER_LOG, '.agent-loop-watcher.log'),
+    watcherState: statePath(env.AGENT_LOOP_WATCHER_STATE, '.agent-loop-watcher-state.json'),
+  };
+}
+
+function childEnv(cwd, paths) {
+  return {
+    AGENT_LOOP_REPO: cwd,
+    AGENT_LOOP_LOCK: paths.lock,
+    AGENT_LOOP_STOP: paths.stop,
+    AGENT_LOOP_STOP_REPORT: paths.report,
+    AGENT_LOOP_LOG: paths.log,
+    AGENT_LOOP_HEARTBEAT_FILE: paths.heartbeat,
+    AGENT_LOOP_UNSAFE: paths.unsafe,
+    AGENT_LOOP_BENCH_FILE: paths.bench,
   };
 }
 
@@ -187,24 +218,20 @@ function start() {
     vscode.window.showErrorMessage(`Agent Loop: the bundled dispatcher is missing (${DISPATCHER}). Reinstall the extension.`);
     return;
   }
-  const { lock, stop, report } = statePaths();
-  try { fs.unlinkSync(stop); } catch { /* no stale Safe Stop flag → nothing to clear */ }
+  const paths = statePaths();
+  try { fs.unlinkSync(paths.stop); } catch { /* no stale Safe Stop flag → nothing to clear */ }
   // AGENT_LOOP_REPO pins the dispatcher to this repo regardless of where the runner itself lives.
   const term = vscode.window.createTerminal({
     name: TERMINAL_NAME,
     cwd,
     // Pin the resolved paths into the child so the extension and dispatcher cannot diverge even when
     // the settings came from ~/.agent-loop.env rather than the extension host's process environment.
-    env: {
-      AGENT_LOOP_REPO: cwd,
-      AGENT_LOOP_LOCK: lock,
-      AGENT_LOOP_STOP: stop,
-      AGENT_LOOP_STOP_REPORT: report,
-    },
+    env: childEnv(cwd, paths),
   });
   activeTerminal = term;
   term.show();
   term.sendText(`node "${DISPATCHER}" --watch`);
+  ensureWatcher();
   render();
 }
 
@@ -234,16 +261,11 @@ function recoverUnsafeStop() {
     vscode.window.showErrorMessage(`Agent Loop: the bundled dispatcher is missing (${DISPATCHER}). Reinstall the extension.`);
     return;
   }
-  const { lock, stop, report } = statePaths();
+  const paths = statePaths();
   const term = vscode.window.createTerminal({
     name: TERMINAL_NAME,
     cwd,
-    env: {
-      AGENT_LOOP_REPO: cwd,
-      AGENT_LOOP_LOCK: lock,
-      AGENT_LOOP_STOP: stop,
-      AGENT_LOOP_STOP_REPORT: report,
-    },
+    env: childEnv(cwd, paths),
   });
   activeTerminal = term;
   term.show();
@@ -319,6 +341,272 @@ function render() {
   }
 }
 
+let watcherTimer = null;
+let watcherBusy = false;
+let watcherMemory = null;
+let watcherClaudeOnPath = null;
+let playbookLogged = false;
+
+function watcherSettings() {
+  const env = loadStateEnv();
+  if (watcherClaudeOnPath == null) watcherClaudeOnPath = watcher.claudeOnPath();
+  return {
+    env,
+    paths: resolveStatePaths(env),
+    mode: watcher.watcherMode(env.AGENT_LOOP_WATCHER, watcherClaudeOnPath),
+  };
+}
+
+function ensureWatcher() {
+  const { env, paths, mode } = watcherSettings();
+  if (mode === 'off') return;
+  if (watcherTimer) return;
+  if (mode === 'playbook' && !playbookLogged) {
+    try { watcher.appendLog(paths.watcherLog, 'watcher playbook only; claude is not on PATH'); } catch { /* log is best-effort */ }
+    playbookLogged = true;
+  }
+  const pollMs = watcher.pollSeconds(env.AGENT_LOOP_WATCHER_POLL_S) * 1000;
+  watcherTimer = setInterval(() => { void watcherTick(); }, pollMs);
+  void watcherTick();
+}
+
+function stopWatcher() {
+  if (!watcherTimer) return;
+  clearInterval(watcherTimer);
+  watcherTimer = null;
+}
+
+function readLogChunk(file, offset) {
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { return { lines: [], nextOffset: offset || 0, lastLine: '' }; }
+  const start = Math.min(Math.max(0, offset || 0), size);
+  const fh = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(size - start);
+    if (buf.length) fs.readSync(fh, buf, 0, buf.length, start);
+    const chunk = watcher.readNewLog(buf, 0);
+    const tailStart = Math.max(0, size - 8000);
+    const tail = Buffer.alloc(size - tailStart);
+    if (tail.length) fs.readSync(fh, tail, 0, tail.length, tailStart);
+    const parts = tail.toString('utf8').split(/\n/).filter(Boolean);
+    return { lines: chunk.lines, nextOffset: start + chunk.nextOffset, lastLine: parts[parts.length - 1] || '' };
+  } finally { fs.closeSync(fh); }
+}
+
+function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+async function collectFacts(env, paths, mode) {
+  const now = Date.now();
+  const heartbeat = readJson(paths.heartbeat);
+  let heartbeatAgeMs = null;
+  try { heartbeatAgeMs = Math.max(0, now - fs.statSync(paths.heartbeat).mtimeMs); } catch { /* missing file */ }
+  let lockRaw = null;
+  let lockExists = false;
+  try { lockRaw = fs.readFileSync(paths.lock, 'utf8'); lockExists = true; } catch { /* no lock */ }
+  const lock = lockRaw == null ? null : parseLockRecord(lockRaw);
+  const lockPidAlive = !!(lock && pidAlive(lock.pid));
+  const pidAliveNow = !!(heartbeat && pidAlive(heartbeat.pid));
+  let stopFlag = '';
+  try { stopFlag = fs.readFileSync(paths.stop, 'utf8'); } catch { /* not stopping */ }
+  const unsafeRaw = readJson(paths.unsafe);
+  let unsafe = null;
+  if (unsafeRaw) {
+    const pids = [...new Set([...(unsafeRaw.children || []), unsafeRaw.pid].filter(Boolean))];
+    let sandboxNewerThanStop = false;
+    const stoppedAt = unsafeRaw.at ? Date.parse(unsafeRaw.at) : NaN;
+    if (unsafeRaw.sandboxDir && Number.isFinite(stoppedAt)) {
+      sandboxNewerThanStop = watcher.newestMtime(unsafeRaw.sandboxDir) > stoppedAt;
+    }
+    unsafe = { pids: pids.map(pid => ({ pid, alive: pidAlive(pid) })), sandboxNewerThanStop };
+  }
+  if (!watcherMemory) {
+    watcherMemory = watcher.loadMemory(paths.watcherState);
+    if (!fs.existsSync(paths.watcherState)) {
+      let size = 0;
+      try { size = fs.statSync(paths.log).size; } catch { /* no log yet */ }
+      watcherMemory.offset = size;
+    }
+  }
+  const chunk = readLogChunk(paths.log, watcherMemory.offset || 0);
+  const stageLimitMs = watcher.stageLimitMs(heartbeat && heartbeat.stage, env);
+  let cpuRatio = null;
+  let ioUnchanged = null;
+  let ioGapMs = null;
+  let children = null;
+  if (pidAliveNow && heartbeatAgeMs != null && heartbeatAgeMs > stageLimitMs) {
+    const sample = await watcher.sampleProcess(heartbeat.pid);
+    cpuRatio = sample.cpuRatio;
+    ioUnchanged = sample.ioUnchanged;
+    ioGapMs = sample.ioGapMs;
+    children = sample.children;
+  }
+  const coderParts = [];
+  let coderActiveBeforeKill = false;
+  for (const file of String(env.AGENT_LOOP_WATCHER_CODER_LOGS || '').split(',').map(s => s.trim()).filter(Boolean)) {
+    try {
+      const text = fs.readFileSync(file, 'utf8');
+      coderParts.push(watcher.tailText(text, 200));
+      const mtime = fs.statSync(file).mtimeMs;
+      if (watcher.coderWasActiveBeforeKill(chunk.lines, mtime)) coderActiveBeforeKill = true;
+    } catch { /* unreadable coder log is not evidence */ }
+  }
+  let stoppedForMs = null;
+  if (heartbeat && heartbeat.stage === 'stopped' && heartbeat.stageSince) {
+    const since = Date.parse(heartbeat.stageSince);
+    if (Number.isFinite(since)) stoppedForMs = now - since;
+  } else if (chunk.lastLine && /Safe Stop complete/i.test(lineBodySafe(chunk.lastLine))) {
+    const at = Date.parse((/^\[([^\]]+)\]/.exec(String(chunk.lastLine)) || [])[1] || '');
+    if (Number.isFinite(at)) stoppedForMs = now - at;
+  }
+  const seeds = String(env.AGENT_LOOP_VERIFY_SEED_DIRS || '').split(',').map(s => s.trim()).filter(Boolean);
+  return {
+    now,
+    env,
+    version: PKG.version,
+    os: process.platform,
+    claudeMode: mode === 'full' ? 'full' : 'playbook',
+    phase2: watcher.PHASE2,
+    heartbeat,
+    heartbeatAgeMs,
+    stageLimitMs,
+    pid: heartbeat && heartbeat.pid,
+    pidAlive: pidAliveNow,
+    lock,
+    lockExists,
+    lockPidAlive,
+    stopFlag,
+    lines: chunk.lines,
+    nextOffset: chunk.nextOffset,
+    lastLogLine: chunk.lastLine,
+    stoppedForMs,
+    unsafe,
+    cpuRatio,
+    ioUnchanged,
+    ioGapMs,
+    children,
+    coderLogText: watcher.redact(coderParts.join('\n')),
+    coderActiveBeforeKill,
+    onlyWorkingCoder: null,
+    configuredSeedCount: seeds.length,
+    maxFixes: numberSetting(env.AGENT_LOOP_WATCHER_MAX_FIXES, 2),
+    maxCallsPerHour: numberSetting(env.AGENT_LOOP_WATCHER_MAX_CALLS_PER_H, 4),
+    pass: heartbeat && heartbeat.pass,
+    loopStopped: !pidAliveNow && !lockPidAlive,
+  };
+}
+
+function lineBodySafe(line) {
+  return String(line).replace(/^\s*\[[^\]]*\]\s*/, '');
+}
+
+function numberSetting(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function runNode(args, cwd) {
+  return new Promise(resolve => {
+    const child = cp.spawn(process.execPath, args, {
+      cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...childEnv(cwd, statePaths()) },
+    });
+    let out = '';
+    const timer = setTimeout(() => { watcher.killProcessTree(child.pid); }, 120_000);
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { out += d; });
+    child.on('close', code => { clearTimeout(timer); resolve({ code, out: watcher.redact(out) }); });
+    child.on('error', e => { clearTimeout(timer); resolve({ code: 1, out: watcher.redact(e.message) }); });
+  });
+}
+
+async function applyDecision(decision, paths) {
+  const effects = decision.effects || {};
+  let probeNote = '';
+  if (effects.probe) {
+    probeNote = await watcher.runProbes(decision.probeMode || 'probe');
+  }
+  if (effects.kill) {
+    let lock = null;
+    try { lock = parseLockRecord(fs.readFileSync(paths.lock, 'utf8')); } catch { /* lock already gone */ }
+    const heartbeat = readJson(paths.heartbeat);
+    if (!lock || !heartbeat || lock.pid !== heartbeat.pid || !lock.nonce || lock.nonce !== heartbeat.nonce) {
+      watcher.appendLog(paths.watcherLog, 'refused to kill: lock nonce does not match the heartbeat');
+    } else {
+      watcher.killProcessTree(lock.pid);
+    }
+  }
+  if (effects.recover) {
+    const cwd = repoRoot();
+    if (cwd) await runNode([DISPATCHER, '--recover', '--yes'], cwd);
+  }
+  if (effects.resetStub && decision.taskId && /^\w[\w-]*$/.test(decision.taskId)) {
+    const cwd = repoRoot();
+    if (cwd) await runNode([DISPATCHER, '--reset-stub', decision.taskId, '--yes'], cwd);
+  }
+  if (effects.bench && decision.coderName && /^(claude|codex|grok)$/.test(decision.coderName)) {
+    const cwd = repoRoot();
+    if (cwd) await runNode([DISPATCHER, '--bench-coder', decision.coderName, '--yes'], cwd);
+  }
+  if (effects.clearLock) { try { fs.unlinkSync(paths.lock); } catch { /* already gone */ } }
+  if (effects.clearStop) { try { fs.unlinkSync(paths.stop); } catch { /* already gone */ } }
+  if (effects.writeStopFlag) fs.writeFileSync(paths.stop, watcher.watcherStopText(new Date()));
+  if (decision.report) {
+    const body = probeNote ? `${decision.report}\n- probe output:\n\n\`\`\`\n${probeNote}\n\`\`\`\n` : decision.report;
+    watcher.writeReport(paths.watcherReport, body);
+  }
+  if (decision.logLine) watcher.appendLog(paths.watcherLog, decision.logLine);
+  if (effects.notify && vscode.window) {
+    const show = decision.response === 'STOP' ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
+    show(`Agent Loop watcher: ${decision.summary || decision.row}`, 'Open report').then(pick => {
+      if (pick) vscode.commands.executeCommand('agentLoop.openWatcherReport');
+    });
+  }
+  if (effects.start) {
+    let flag = '';
+    try { flag = fs.readFileSync(paths.stop, 'utf8'); } catch { /* no flag */ }
+    if (watcher.isUserStop(flag) || watcher.isWatcherStop(flag)) {
+      watcher.appendLog(paths.watcherLog, 'not restarting: a stop flag is set');
+    } else if (!isRunning()) start();
+  }
+}
+
+async function watcherTick() {
+  if (watcherBusy) return;
+  watcherBusy = true;
+  try {
+    const { env, paths, mode } = watcherSettings();
+    if (mode === 'off') { stopWatcher(); return; }
+    const facts = await collectFacts(env, paths, mode);
+    let decision = watcher.evaluate(facts, watcherMemory || watcher.emptyMemory());
+    if (decision.needsClaude) {
+      const answer = await watcher.runClaude(env.AGENT_LOOP_WATCHER_CMD || null, decision.bundle);
+      const claude = answer.ok ? { text: answer.text } : { unavailable: true, why: answer.why };
+      const calls = [...((decision.memory && decision.memory.claudeCalls) || []), Date.now()];
+      decision = watcher.evaluate(facts, { ...decision.memory, claudeCalls: calls }, claude);
+    }
+    watcherMemory = decision.memory;
+    try { watcher.saveMemory(paths.watcherState, watcherMemory); } catch { /* state file is best-effort */ }
+    await applyDecision(decision, paths);
+    const still = facts.pidAlive || facts.lockExists || facts.unsafe || watcher.isUserStop(facts.stopFlag) || watcher.isWatcherStop(facts.stopFlag);
+    if (!still) stopWatcher();
+  } catch (e) {
+    try {
+      const paths = statePaths();
+      watcher.appendLog(paths.watcherLog, `watcher tick failed: ${e.message}`);
+    } catch { /* nothing else we can record */ }
+  } finally {
+    watcherBusy = false;
+  }
+}
+
+function openWatcherReport() {
+  const file = statePaths().watcherReport;
+  if (!fs.existsSync(file)) { vscode.window.showInformationMessage('Agent Loop: no watcher report yet.'); return; }
+  return vscode.workspace.openTextDocument(file).then(doc => vscode.window.showTextDocument(doc));
+}
+
 function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand('agentLoop.toggle', toggle),
@@ -333,6 +621,7 @@ function activate(context) {
       vscode.window.showTextDocument(await vscode.workspace.openTextDocument(REPORT_FILE));
     }),
     vscode.commands.registerCommand('agentLoop.recover', recoverUnsafeStop),
+    vscode.commands.registerCommand('agentLoop.openWatcherReport', () => openWatcherReport()),
   );
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -351,6 +640,8 @@ function activate(context) {
 
   // Poll the lock/stop files: the dispatcher can start, stop itself at the end of a round, or die,
   // none of which fire a terminal event.
+  if (isRunning()) ensureWatcher();
+
   let wasRunning = isRunning();
   poller = setInterval(() => {
     const running = isRunning();
@@ -375,5 +666,8 @@ function deactivate() {}
 module.exports = {
   activate,
   deactivate,
-  __test: { loadStateEnv, resolveStatePaths, parseLockRecord, lockLooksLive, pickTerminal, DISPATCHER, CONFIG_EXAMPLE, openConfig },
+  __test: {
+    loadStateEnv, resolveStatePaths, parseLockRecord, lockLooksLive, pickTerminal,
+    DISPATCHER, CONFIG_EXAMPLE, openConfig, childEnv, STATE_ENV_KEYS,
+  },
 };

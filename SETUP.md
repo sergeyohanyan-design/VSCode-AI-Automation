@@ -314,33 +314,24 @@ again only when its signature changes. A ceiling repeat includes the count in
 that signature, so a higher count is one new line. Only one window runs the
 watcher. Any other window writes one Output-channel line and does not act or
 narrate. `AGENT_LOOP_WATCHER_NARRATE=problems` or `events` explains the same
-facts in a Claude Code session for this folder. Experimental: tested in
-Cursor; not yet tested in VS Code. It relies on internal Claude Code
-extension commands (tested with Claude Code extension 2.1.309). The default is `off`. A match
-is sent at once. Other events wait `AGENT_LOOP_WATCHER_NARRATE_MIN_S` seconds
-(default 300) and share the hourly Claude cap. A turn is a success only when
-Claude exits 0 and the session file exists, and a resume must make that file
-larger. If the file was not saved, the Output channel and the watcher log say
-once per run that Claude exited 0 but saved no session, and no tab is opened.
-A failed narration is logged and the playbook keeps going. The session is
-opened once, in an editor tab beside the current one. If that open cannot be
-confirmed, it is not opened again. A confirmed tab is replaced when it is not
-the tab you are reading. The Claude sidebar does not load turns appended from
-the watcher, so narration does not use it. One measured turn, a one-line
-reply with `--output-format json`, reported 2 input tokens, 12,695
-cache-creation tokens and 73,283 cache-read tokens, and wrote a session file
-of about 590 KB, because the workspace's Claude settings, hooks and project
-instructions load on every turn. `claude --help` describes `--safe-mode` as
-disabling those customizations while auth still works. Narration does not
-pass that flag. `AGENT_LOOP_WATCHER_NARRATE_DEBUG=1` prints the narration
-command, the working directory, the names of inherited Claude-related
-variables, and whether the session file was saved. If Claude has not trusted
-this folder, the Output channel and `~/.agent-loop-watcher.log` say once per
-run to open the folder in Claude Code and accept the trust prompt. The
-watcher never accepts trust itself. **Agent Loop: Test watcher narration**
-sends two plain test batches about 20 seconds apart. It uses its own session
-and works while narration is off. Set the debug key before that click when
-you need the child environment.
+facts in the Output channel. Experimental. The default is `off`. It uses the
+`claude` CLI, not a Claude chat. A match is sent at once and the channel is
+shown without taking focus. Other events wait
+`AGENT_LOOP_WATCHER_NARRATE_MIN_S` seconds (default 300), share the hourly
+Claude cap, and do not show the channel on their own. Each call is stateless.
+The command includes `--no-session-persistence` and `--safe-mode`, with tools
+disabled and permission prompts off. `--bare` is not used. The working
+directory is an empty temp directory. The reply is redacted and written as
+one block. A failed narration is logged and the playbook keeps going. One
+measured call in that temp directory, with `--output-format json` (narration
+does not pass that flag), used 2 input tokens, 10,422 cache-creation tokens
+and 73,283 cache-read tokens. The same call with `--safe-mode` used 2, 392
+and 1,647, and a subscription login still worked, so narration passes
+`--safe-mode`. `AGENT_LOOP_WATCHER_NARRATE_DEBUG=1` prints the command, the
+working directory, the exit code, and the first 300 characters of stderr.
+**Agent Loop: Test watcher narration** sends one test batch through that
+path. The text says it is a test. The channel is shown, and the block or the
+failure is written. It works while narration is off.
 
 ---
 

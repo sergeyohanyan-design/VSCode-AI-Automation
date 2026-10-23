@@ -334,26 +334,15 @@ function claudeOnPath() {
 }
 
 function emptyNarration() {
-  return {
-    sessionId: null, stamp: null, lastSentAt: null, pending: [],
-    budgetNotedAt: null, runId: null, trustNoted: false, noSessionNoted: false,
-  };
+  return { lastSentAt: null, pending: [], budgetNotedAt: null };
 }
 
 function copyNarration(value) {
   const n = value && typeof value === 'object' ? value : {};
-  const stamp = n.stamp && Number.isFinite(n.stamp.size) && Number.isFinite(n.stamp.mtimeMs)
-    ? { size: n.stamp.size, mtimeMs: n.stamp.mtimeMs }
-    : null;
   return {
-    sessionId: typeof n.sessionId === 'string' && n.sessionId ? n.sessionId : null,
-    stamp,
     lastSentAt: Number.isFinite(n.lastSentAt) ? n.lastSentAt : null,
     pending: Array.isArray(n.pending) ? n.pending.slice(-NARRATION_PENDING_CAP) : [],
     budgetNotedAt: Number.isFinite(n.budgetNotedAt) ? n.budgetNotedAt : null,
-    runId: typeof n.runId === 'string' && n.runId ? n.runId : null,
-    trustNoted: n.trustNoted === true,
-    noSessionNoted: n.noSessionNoted === true,
   };
 }
 
@@ -1405,7 +1394,8 @@ async function runProbes(mode, opts = {}) {
 function loadMemory(file) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return parsed && typeof parsed === 'object' ? { ...emptyMemory(), ...parsed } : emptyMemory();
+    if (!parsed || typeof parsed !== 'object') return emptyMemory();
+    return { ...emptyMemory(), ...parsed, narration: copyNarration(parsed.narration) };
   } catch { return emptyMemory(); }
 }
 
@@ -1518,44 +1508,38 @@ function narrationMinMs(value) {
   return Math.floor(n * 1000);
 }
 
-function narrationArgs(base = DEFAULT_CLAUDE_ARGS) {
-  return base.filter(arg => arg !== '--no-session-persistence' && arg !== '--bare');
-}
+// Cheaper of the two measured temp-directory calls, and a subscription login
+// still works. The unknown-failure command does not pass this flag.
+const NARRATION_SAFE_MODE = true;
 
-function narrationCommand({ sessionId, resume = false } = {}, base) {
-  const args = narrationArgs(base);
-  const at = args.indexOf('-p');
-  args.splice(at >= 0 ? at + 1 : args.length, 0, resume ? '--resume' : '--session-id', sessionId);
+function narrationArgs(base = DEFAULT_CLAUDE_ARGS) {
+  const source = Array.isArray(base) ? base : DEFAULT_CLAUDE_ARGS;
+  const args = [];
+  for (let i = 0; i < source.length; i++) {
+    const arg = source[i];
+    if (arg === '--bare') continue;
+    if (arg === '--session-id' || arg === '--resume') {
+      const next = source[i + 1];
+      if (next != null && !String(next).startsWith('--')) i += 1;
+      continue;
+    }
+    args.push(arg);
+  }
+  if (!args.includes('--no-session-persistence')) args.push('--no-session-persistence');
+  if (NARRATION_SAFE_MODE && !args.includes('--safe-mode')) args.push('--safe-mode');
   return args;
 }
 
-function narrationSessionId(randomUUID) {
-  const make = randomUUID || (() => require('crypto').randomUUID());
-  return make();
+function narrationCommand(base) {
+  return narrationArgs(base);
 }
 
-// A recorded size and mtime is the watcher's own write. Any other change means
-// the human typed in the session, so the next turn starts a new one.
-function sessionChangedByOther(recorded, current) {
-  if (!recorded || !Number.isFinite(recorded.size) || !Number.isFinite(recorded.mtimeMs)) return false;
-  if (!current || current.exists === false) return true;
-  return current.size !== recorded.size || current.mtimeMs !== recorded.mtimeMs;
-}
-
-function findSessionStat(root, sessionId, fsApi = fs) {
-  if (!root || !sessionId) return { exists: false };
-  let names = [];
-  try { names = fsApi.readdirSync(root, { withFileTypes: true }); }
-  catch { return { exists: false }; }
-  for (const entry of names) {
-    if (!entry.isDirectory()) continue;
-    const file = path.join(root, entry.name, `${sessionId}.jsonl`);
-    try {
-      const st = fsApi.statSync(file);
-      return { exists: true, size: st.size, mtimeMs: st.mtimeMs };
-    } catch { /* a different project directory */ }
-  }
-  return { exists: false };
+// One empty directory for every narration call. Same idea as the dispatcher's
+// availability probe: the workspace's instructions and hooks stay out.
+let narrationDir = null;
+function narrationCwd() {
+  if (!narrationDir) narrationDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-loop-narrate-'));
+  return narrationDir;
 }
 
 // Stage changes, status lines, verdicts and kills. A repeated `… coder stage`
@@ -1642,14 +1626,13 @@ function planNarration({
   return { send: false, pending: queue, reason: queue.length ? 'rate' : 'empty' };
 }
 
-function narrationPrompt(items, { first = false } = {}) {
+function narrationPrompt(items) {
   const lines = (items || []).map(item => redact(item.text || '')).filter(Boolean);
-  if (!first) return lines.join('\n');
   const parts = [
     'You are the Agent Loop watcher narrator.',
     'Explain in short, plain sentences what happened, whether it is normal, and what the human should do.',
     'Nothing is a valid answer.',
-    'Do not invent causes the log does not show.',
+    'Do not invent causes the lines do not show.',
   ];
   const matched = (items || []).find(item => item.row);
   if (matched) {
@@ -1661,137 +1644,27 @@ function narrationPrompt(items, { first = false } = {}) {
   return parts.join('\n');
 }
 
-const CLAUDE_PANEL_VIEW = 'claudeVSCodePanel';
-const NARRATION_TRUST_LINE = 'Open this folder in Claude Code once and accept the trust prompt.';
-
-function claudePanelViewType(tab) {
-  if (!tab || typeof tab !== 'object') return '';
-  const input = tab.input && typeof tab.input === 'object' ? tab.input.viewType : '';
-  return String(tab.viewType || input || '');
+function narrationClock(when = new Date()) {
+  const h = String(when.getHours()).padStart(2, '0');
+  const m = String(when.getMinutes()).padStart(2, '0');
+  return `${h}:${m}`;
 }
 
-function isClaudePanelTab(tab) {
-  return claudePanelViewType(tab).endsWith(CLAUDE_PANEL_VIEW);
+function narrationBlock(reply, when = new Date()) {
+  const label = `── Claude · ${narrationClock(when)} `;
+  const width = Math.max(label.length, 43);
+  const body = redact(reply);
+  return `${label}${'─'.repeat(width - label.length)}\n${body}\n${'─'.repeat(width)}`;
 }
 
-// VS Code can hand back a new Tab object for the same tab. Identity is not a
-// match. The key is the input kind, view type, label and group column.
-function tabInputKind(tab) {
-  const input = tab && tab.input;
-  if (!input || typeof input !== 'object') return '';
-  const name = input.constructor && input.constructor.name;
-  return typeof name === 'string' ? name : '';
-}
-
-function tabColumn(tab) {
-  if (!tab || typeof tab !== 'object' || !tab.group || tab.group.viewColumn == null) return '';
-  return tab.group.viewColumn;
-}
-
-function tabKey(tab) {
-  if (!tab || typeof tab !== 'object') return '';
-  return [tabInputKind(tab), claudePanelViewType(tab), String(tab.label || ''), String(tabColumn(tab))].join('\0');
-}
-
-function tabDebugLine(tab) {
-  const label = tab && tab.label != null ? String(tab.label) : '';
-  return `input=${tabInputKind(tab)} viewType=${claudePanelViewType(tab)} label=${label} column=${tabColumn(tab)}`;
-}
-
-// One new Claude panel tab is that tab. The same tab as a new object, a
-// different view type, or two new Claude tabs is no result.
-function findNewClaudeTab(before, after) {
-  const prior = new Map();
-  for (const tab of before || []) {
-    if (!tab) continue;
-    const key = tabKey(tab);
-    prior.set(key, (prior.get(key) || 0) + 1);
-  }
-  const used = new Map();
-  const added = [];
-  for (const tab of after || []) {
-    if (!tab || !isClaudePanelTab(tab)) continue;
-    const key = tabKey(tab);
-    const seen = (used.get(key) || 0) + 1;
-    used.set(key, seen);
-    if (seen <= (prior.get(key) || 0)) continue;
-    added.push(tab);
-  }
-  return added.length === 1 ? added[0] : null;
-}
-
-// An event object often has no group column yet. A blank column still means
-// the same tab. Two tabs in different columns stay two tabs.
-function tabsLooselySame(a, b) {
-  if (tabInputKind(a) !== tabInputKind(b)) return false;
-  if (claudePanelViewType(a) !== claudePanelViewType(b)) return false;
-  if (String((a && a.label) || '') !== String((b && b.label) || '')) return false;
-  const left = tabColumn(a);
-  const right = tabColumn(b);
-  return left === '' || right === '' || String(left) === String(right);
-}
-
-function combineTabSnapshots(primary, extra) {
-  const out = [];
-  for (const tab of primary || []) if (tab) out.push(tab);
-  for (const tab of extra || []) {
-    if (!tab || out.some(item => tabsLooselySame(item, tab))) continue;
-    out.push(tab);
-  }
-  return out;
-}
-
-// open: show the session. refresh: close and open the editor tab again.
-// defer: the human is in that tab. leave: they closed it.
-function narrationSurfaceAction({ presented = false, tracked = false, open = false, focused = false } = {}) {
-  if (!presented || !tracked) return 'open';
-  if (!open) return 'leave';
-  if (focused) return 'defer';
-  return 'refresh';
-}
-
-function narrationTrustFailure(text) {
-  return /has not been trusted/i.test(String(text || ''));
-}
-
-// Exit 0 is not enough. The first turn must leave a non-empty session file.
-// A resume must make that file larger.
-function narrationSaved({ code, before, after, resume = false } = {}) {
-  if (code !== 0) return false;
-  if (!after || after.exists !== true || !(after.size > 0)) return false;
-  if (!resume) return true;
-  const prior = before && Number.isFinite(before.size) ? before.size : 0;
-  return after.size > prior;
-}
-
-function narrationNoSessionLine(cwd) {
-  return `narration failed: claude exited 0 but saved no session (${cwd})`;
+// A playbook row reveals the channel and leaves focus where it is. An events
+// batch never reveals the channel on its own.
+function narrationReveal(reason) {
+  return { show: reason === 'row', preserveFocus: true };
 }
 
 function narrationDebugEnabled(value) {
   return /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
-}
-
-function narrationDebugEnvNames(env) {
-  return Object.keys(env || {}).filter(key => {
-    const name = String(key);
-    return /^(CLAUDE|ANTHROPIC|CODEX)/.test(name) || name.includes('SESSION');
-  }).sort();
-}
-
-// Copy of the parent environment for the narration child only.
-// No variable is removed. The Claude Code extension assigns
-// CLAUDE_AGENT_SDK_VERSION on the extension-host process. The CLI only
-// appends that name to its user-agent. A narration-shaped spawn with that
-// variable set still wrote the session file, so it is not the cause and it
-// is not removed. Auth and PATH stay.
-function narrationChildEnv(base = process.env) {
-  return { ...base };
-}
-
-// Open the session once. A later turn may still refresh a tab that was found.
-function narrationMayOpen(action, openAttempted) {
-  return action !== 'open' || openAttempted !== true;
 }
 
 // One watcher per machine. A missing record, a dead pid, or a stale heartbeat
@@ -1821,10 +1694,7 @@ module.exports = {
   effectiveWatcherMode, claudeSelfCheckPassed, claudeSelfCheckLog,
   watcherShouldStop, shouldEnsureWatcher, parseStubLine, safeGitRef, appendCommitCounts,
   watcherVerbose, narrationMode, narrationMinMs, narrationArgs, narrationCommand,
-  narrationSessionId, sessionChangedByOther, findSessionStat, notableEvents,
-  unmatchedNotable, planNarration, narrationPrompt, copyNarration, emptyNarration,
-  isClaudePanelTab, findNewClaudeTab, narrationSurfaceAction, narrationTrustFailure,
-  NARRATION_TRUST_LINE, narrationSaved, narrationNoSessionLine, narrationDebugEnabled,
-  narrationDebugEnvNames, narrationChildEnv, narrationMayOpen, tabKey, tabDebugLine,
-  combineTabSnapshots, claimWatcher,
+  narrationCwd, NARRATION_SAFE_MODE, notableEvents,
+  unmatchedNotable, planNarration, narrationPrompt, narrationBlock, narrationReveal,
+  copyNarration, emptyNarration, narrationDebugEnabled, claimWatcher,
 };

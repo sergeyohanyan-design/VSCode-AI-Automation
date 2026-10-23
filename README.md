@@ -77,36 +77,27 @@ Beyond the routing, the parts that matter in practice:
   signature changes, and a ceiling repeat's signature includes the count.
   Only one window on the machine runs the watcher. Another window says so
   once in the Output channel and does not act or narrate.
-  `AGENT_LOOP_WATCHER_NARRATE` can also explain those events in a Claude
-  Code session for this workspace (`off` by default). Experimental: tested
-  in Cursor; not yet tested in VS Code. It relies on internal Claude Code
-  extension commands (tested with Claude Code extension 2.1.309). A turn counts as
-  success only when Claude exits 0 and the session file is on disk: present
-  after the first turn, and larger after a resume. If it is missing, the
-  Output channel and the watcher log say once per run that Claude exited 0
-  but saved no session, and no tab is opened. The session opens once, in an
-  editor tab beside the current one. If that open cannot be confirmed, a
-  later turn does not open another tab. A confirmed tab is replaced when you
-  are not reading it, so the new text loads. A tab you are reading stays put
-  until a later turn. Closing it leaves it closed. The Claude sidebar does
-  not load turns the watcher appends, and a session it is already showing is
-  not opened again as a new tab, so narration stays in the editor. Every open
-  passes a programmatic option, so the chat input does not take the cursor
-  and your Claude location setting stays as it is. One measured turn (a
-  one-line reply, `--output-format json`) reported 2 input tokens, 12,695
-  cache-creation tokens and 73,283 cache-read tokens, and wrote a session
-  file of about 590 KB. That cache is the workspace's Claude settings, hooks
-  and project instructions. `claude --help` describes `--safe-mode` as
-  starting with those customizations disabled while auth still works.
-  Narration does not pass it. `AGENT_LOOP_WATCHER_NARRATE_DEBUG=1` logs the
-  narration command, the working directory, inherited Claude-related variable
-  names, and whether the session file exists. If Claude does not trust
-  this folder, the Output channel and the watcher log say once per dispatcher
-  run to open the folder in Claude Code and accept the trust prompt. The
-  watcher does not accept it for you. **Agent Loop: Test watcher narration**
-  sends two short test batches about 20 seconds apart on its own session,
-  including while narration is off. The report is
-  `~/.agent-loop-watcher-report.md`.
+  `AGENT_LOOP_WATCHER_NARRATE` can also explain those events in that same
+  Output channel (`off` by default). Experimental. It uses the `claude` CLI,
+  not a Claude chat. `problems` sends a playbook match at once and shows the
+  channel without taking focus. `events` also sends stage, status, verdict
+  and kill changes, batched at `AGENT_LOOP_WATCHER_NARRATE_MIN_S` (default
+  300), and does not show the channel on its own. Calls share the hourly
+  Claude cap. Each call is stateless. The command is the default headless
+  command, including `--no-session-persistence`, with tools disabled,
+  permission prompts off, and `--safe-mode`. `--bare` is not used. The
+  working directory is an empty temp directory, so the workspace's
+  instructions and hooks stay out. The reply is redacted and written as one
+  block. A failure is logged and the tick continues. One measured call in
+  that temp directory, with `--output-format json` (narration does not pass
+  that flag), used 2 input tokens, 10,422 cache-creation tokens and 73,283
+  cache-read tokens. The same call with `--safe-mode` used 2, 392 and 1,647,
+  and a subscription login still worked, so narration passes `--safe-mode`.
+  `AGENT_LOOP_WATCHER_NARRATE_DEBUG=1` logs the command, the working
+  directory, the exit code, and the first 300 characters of stderr.
+  **Agent Loop: Test watcher narration** sends one test batch through that
+  path, says that it is a test, and shows the channel. It works while
+  narration is off. The report is `~/.agent-loop-watcher-report.md`.
 - **Reviewers only ever see the task's own work.** The review diff is taken from the merge base
   with the base branch, never from its moving tip. A hotfix landing on `main` while a task is open
   is not part of that task's diff, so no reviewer can fail a task for "reverting" work it never
@@ -204,7 +195,7 @@ what you don't need — two keys are required, everything else has a working def
 | **Agent commands** | the full CLI invocation for each agent — change model, flags, or binary; the Codex availability check (default `codex login status`, no tokens); Codex reviews default to medium reasoning |
 | **Timing** | poll interval, churn cap, per-stage timeouts, implement idle-progress cap, CLI turn budget, opt-in forge check wait, retry policy |
 | **State files** | lock, stop flag, log, handover report, heartbeat, churn tally, rescue manifest |
-| **Watcher** | on/auto/off, poll, Claude command, fix cap, hourly Claude cap, report, log, offset file, coder log paths, verbose Output channel, optional Claude narration, narration debug |
+| **Watcher** | on/auto/off, poll, Claude command, fix cap, hourly Claude cap, report, log, offset file, coder log paths, verbose Output channel, optional experimental Claude narration, narration debug |
 
 Nothing about your board's vocabulary is hardcoded. If your workflow spells things differently,
 override the names; no code change is needed. `npm test` enforces this — a setting the dispatcher
@@ -225,7 +216,7 @@ reads but the example never documents fails the build.
 | **Agent Loop: Recover unsafe stop** | Commit preserved sandbox work after an unsafe-child stop, if no descendant is still alive. |
 | **Agent Loop: Open the watcher report** | What the watcher last decided, and what to do next. |
 | **Agent Loop: Show watcher activity** | Open the Agent Loop Watcher output channel. |
-| **Agent Loop: Test watcher narration** | Send two test batches, about 20 seconds apart, through the narration path. |
+| **Agent Loop: Test watcher narration** | Send one test batch through the narration path. It says it is a test and shows the Output channel. |
 
 ---
 

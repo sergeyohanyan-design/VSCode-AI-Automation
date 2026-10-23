@@ -1452,104 +1452,67 @@ async function watcherChecks() {
   assert.equal(overflow.pending.length, watcher.NARRATION_PENDING_CAP);
   assert.equal(overflow.pending[overflow.pending.length - 1].text, 'task1 → s39');
 
-  assert.equal(watcher.sessionChangedByOther(null, { exists: true, size: 1, mtimeMs: 1 }), false);
-  assert.equal(watcher.sessionChangedByOther(
-    { size: 1, mtimeMs: 1 }, { exists: true, size: 1, mtimeMs: 1 },
-  ), false);
-  assert.equal(watcher.sessionChangedByOther(
-    { size: 1, mtimeMs: 1 }, { exists: true, size: 2, mtimeMs: 1 },
-  ), true);
-  assert.equal(watcher.sessionChangedByOther({ size: 1, mtimeMs: 1 }, { exists: false }), true);
-
-  const narrArgs = watcher.narrationArgs();
-  assert.ok(!narrArgs.includes('--no-session-persistence'));
+  const narrArgs = watcher.narrationCommand();
+  assert.ok(narrArgs.includes('--no-session-persistence'));
+  assert.ok(!narrArgs.includes('--session-id'));
+  assert.ok(!narrArgs.includes('--resume'));
   assert.ok(!narrArgs.includes('--bare'));
   assert.equal(narrArgs[narrArgs.indexOf('--tools') + 1], '');
   assert.equal(narrArgs[narrArgs.indexOf('--permission-prompts') + 1], 'none');
-  const stripped = watcher.narrationArgs([...watcher.DEFAULT_CLAUDE_ARGS, '--bare']);
+  assert.equal(narrArgs.includes('--safe-mode'), watcher.NARRATION_SAFE_MODE);
+  const stripped = watcher.narrationArgs([
+    ...watcher.DEFAULT_CLAUDE_ARGS, '--bare', '--session-id', 'kept-id', '--resume', 'kept-resume',
+  ]);
+  assert.ok(stripped.includes('--no-session-persistence'));
   assert.ok(!stripped.includes('--bare'));
-  assert.ok(!stripped.includes('--no-session-persistence'));
-  const sessionArg = '00000000-0000-4000-8000-000000000001';
-  const createdCmd = watcher.narrationCommand({ sessionId: sessionArg });
-  assert.ok(createdCmd.includes('--session-id'));
-  assert.ok(!createdCmd.includes('--resume'));
-  assert.ok(!createdCmd.includes('--bare'));
-  const resumedCmd = watcher.narrationCommand({ sessionId: sessionArg, resume: true });
-  assert.ok(resumedCmd.includes('--resume'));
-  assert.ok(!resumedCmd.includes('--no-session-persistence'));
-  const firstPrompt = watcher.narrationPrompt([rowEvent], { first: true });
-  assert.ok(firstPrompt.includes('watcher narrator'));
-  assert.ok(firstPrompt.includes('Do not invent'));
-  assert.ok(firstPrompt.includes('P19'));
-  assert.ok(firstPrompt.includes('Split the task.'));
-  assert.equal(watcher.narrationPrompt([{ text: 'task1 → coding' }], { first: false }), 'task1 → coding');
-
-  const kept = { viewType: 'mainThreadWebview-claudeVSCodePanel', label: 'kept' };
-  const added = { viewType: 'claudeVSCodePanel', label: 'added' };
-  const otherView = { viewType: 'mainThreadWebview-markdown.preview', label: 'note' };
-  const second = { input: { viewType: 'claudeVSCodePanel' }, label: 'second' };
-  assert.equal(watcher.findNewClaudeTab([kept], [kept]), null);
-  assert.equal(watcher.findNewClaudeTab([kept], [kept, added]), added);
-  assert.equal(watcher.findNewClaudeTab([kept], [kept, otherView]), null);
-  assert.equal(watcher.findNewClaudeTab([kept], [kept, added, second]), null);
-  const sameNew = { viewType: 'mainThreadWebview-claudeVSCodePanel', label: 'kept' };
-  assert.equal(watcher.findNewClaudeTab([kept], [sameNew]), null);
-  const twin = { viewType: 'claudeVSCodePanel', label: 'twin', group: { viewColumn: 1 } };
-  const twinAgain = { viewType: 'claudeVSCodePanel', label: 'twin', group: { viewColumn: 1 } };
-  assert.equal(watcher.findNewClaudeTab([], [twin, twinAgain]), null);
-  assert.equal(watcher.combineTabSnapshots([twin], [twinAgain]).length, 1);
-  assert.equal(watcher.combineTabSnapshots([], [twin, twinAgain]).length, 1);
-  assert.equal(watcher.combineTabSnapshots([twin], [{ viewType: 'claudeVSCodePanel', label: 'twin' }]).length, 1);
-  assert.equal(watcher.combineTabSnapshots([twin], [{
-    viewType: 'claudeVSCodePanel', label: 'twin', group: { viewColumn: 2 },
-  }]).length, 2);
-  assert.equal(watcher.isClaudePanelTab(otherView), false);
-  assert.equal(watcher.narrationSurfaceAction({}), 'open');
-  assert.equal(watcher.narrationSurfaceAction({ presented: true, tracked: false }), 'open');
-  assert.equal(watcher.narrationSurfaceAction({ presented: true, tracked: true, open: true, focused: false }), 'refresh');
-  assert.equal(watcher.narrationSurfaceAction({ presented: true, tracked: true, open: true, focused: true }), 'defer');
-  assert.equal(watcher.narrationSurfaceAction({ presented: true, tracked: true, open: false }), 'leave');
-  assert.equal(watcher.narrationTrustFailure('this workspace has not been trusted'), true);
-  assert.equal(watcher.narrationTrustFailure('exit 1'), false);
-  assert.ok(watcher.NARRATION_TRUST_LINE.includes('accept the trust prompt'));
-  assert.equal(watcher.copyNarration({ trustNoted: true, noSessionNoted: true }).trustNoted, true);
-  assert.equal(watcher.copyNarration({ noSessionNoted: true }).noSessionNoted, true);
-  assert.equal(watcher.emptyNarration().trustNoted, false);
-  assert.equal(watcher.emptyNarration().noSessionNoted, false);
-  const forgottenNarration = watcher.forgetRun({ narration: { trustNoted: true, noSessionNoted: true } });
-  assert.equal(forgottenNarration.narration.trustNoted, false);
-  assert.equal(forgottenNarration.narration.noSessionNoted, false);
-  assert.equal(watcher.narrationSaved({ code: 0, after: { exists: false }, resume: false }), false);
-  assert.equal(watcher.narrationSaved({
-    code: 0, before: { exists: true, size: 10 }, after: { exists: true, size: 10 }, resume: true,
-  }), false);
-  assert.equal(watcher.narrationSaved({ code: 0, after: { exists: true, size: 4 }, resume: false }), true);
-  assert.equal(watcher.narrationSaved({
-    code: 0, before: { size: 4 }, after: { exists: true, size: 8 }, resume: true,
-  }), true);
-  assert.equal(
-    watcher.narrationNoSessionLine('<workspace>'),
-    'narration failed: claude exited 0 but saved no session (<workspace>)',
-  );
+  assert.ok(!stripped.includes('--session-id'));
+  assert.ok(!stripped.includes('--resume'));
+  assert.ok(!stripped.includes('kept-id'));
+  assert.ok(!stripped.includes('kept-resume'));
+  const narrDir = watcher.narrationCwd();
+  assert.equal(watcher.narrationCwd(), narrDir);
+  assert.ok(path.resolve(narrDir).startsWith(path.resolve(os.tmpdir())));
+  assert.notEqual(path.resolve(narrDir), path.resolve(ROOT));
+  assert.equal(fs.statSync(narrDir).isDirectory(), true);
+  const narrPrompt = watcher.narrationPrompt([rowEvent]);
+  assert.ok(narrPrompt.includes('watcher narrator'));
+  assert.ok(narrPrompt.includes('Nothing is a valid answer'));
+  assert.ok(narrPrompt.includes('Do not invent'));
+  assert.ok(narrPrompt.includes('P19'));
+  assert.ok(narrPrompt.includes('Split the task.'));
+  const laterPrompt = watcher.narrationPrompt([{ text: 'task1 → coding' }]);
+  assert.ok(laterPrompt.includes('Nothing is a valid answer'));
+  assert.ok(laterPrompt.includes('task1 → coding'));
+  const secretPrompt = watcher.narrationPrompt([{ text: 'saw pk_live_secret' }]);
+  assert.ok(secretPrompt.includes('pk_[redacted]'));
+  assert.ok(!secretPrompt.includes('pk_live_secret'));
+  const blockWhen = new Date(2026, 0, 2, 14, 5, 9);
+  const block = watcher.narrationBlock('plain\npk_live_secret', blockWhen);
+  const blockLines = block.split('\n');
+  assert.match(blockLines[0], /^── Claude · 14:05 ─+$/);
+  assert.equal(blockLines[1], 'plain');
+  assert.equal(blockLines[2], 'pk_[redacted]');
+  assert.match(blockLines[3], /^─+$/);
+  assert.equal(blockLines[0].length, blockLines[3].length);
+  assert.ok(!block.includes('pk_live_secret'));
+  assert.deepEqual(watcher.narrationReveal('row'), { show: true, preserveFocus: true });
+  assert.deepEqual(watcher.narrationReveal('batch'), { show: false, preserveFocus: true });
+  const oldNarration = watcher.copyNarration({
+    sessionId: '00000000-0000-4000-8000-000000000001',
+    stamp: { size: 4, mtimeMs: 4 },
+    lastSentAt: 10,
+    trustNoted: true,
+    noSessionNoted: true,
+  });
+  assert.equal(oldNarration.sessionId, undefined);
+  assert.equal(oldNarration.stamp, undefined);
+  assert.equal(oldNarration.lastSentAt, 10);
+  assert.equal(watcher.emptyNarration().lastSentAt, null);
+  const forgottenNarration = watcher.forgetRun({ narration: { lastSentAt: 10, pending: [{ text: 'x' }] } });
+  assert.equal(forgottenNarration.narration.lastSentAt, null);
+  assert.deepEqual(forgottenNarration.narration.pending, []);
   assert.equal(watcher.narrationDebugEnabled('1'), true);
   assert.equal(watcher.narrationDebugEnabled('off'), false);
-  assert.deepEqual(watcher.narrationDebugEnvNames({
-    PATH: 'bin',
-    CLAUDE_AGENT_SDK_VERSION: '0',
-    ANTHROPIC_BASE_URL: 'https://example.invalid',
-    CODEX_HOME: 'dir',
-    MY_SESSION: 'id',
-    HOME: 'dir',
-  }), ['ANTHROPIC_BASE_URL', 'CLAUDE_AGENT_SDK_VERSION', 'CODEX_HOME', 'MY_SESSION']);
-  const childEnv = watcher.narrationChildEnv({
-    PATH: 'bin', CLAUDE_AGENT_SDK_VERSION: '0', ANTHROPIC_API_KEY: 'present',
-  });
-  assert.equal(childEnv.PATH, 'bin');
-  assert.equal(childEnv.CLAUDE_AGENT_SDK_VERSION, '0');
-  assert.equal(childEnv.ANTHROPIC_API_KEY, 'present');
-  assert.equal(watcher.narrationMayOpen('open', true), false);
-  assert.equal(watcher.narrationMayOpen('open', false), true);
-  assert.equal(watcher.narrationMayOpen('refresh', true), true);
   const unowned = watcher.claimWatcher({ owner: null, now: 1000, pid: 10, staleMs: 90000 });
   assert.equal(unowned.act, true);
   assert.equal(unowned.tookOver, true);
@@ -1576,19 +1539,6 @@ async function watcherChecks() {
   });
   assert.equal(otherStale.act, true);
   assert.equal(otherStale.tookOver, true);
-
-  const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-loop-session-'));
-  try {
-    const projectDir = path.join(sessionRoot, 'slug');
-    fs.mkdirSync(projectDir);
-    fs.writeFileSync(path.join(projectDir, `${sessionArg}.jsonl`), 'x\n');
-    const stat = watcher.findSessionStat(sessionRoot, sessionArg);
-    assert.equal(stat.exists, true);
-    assert.equal(stat.size, 2);
-    assert.equal(watcher.findSessionStat(sessionRoot, '00000000-0000-4000-8000-000000000002').exists, false);
-  } finally {
-    fs.rmSync(sessionRoot, { recursive: true, force: true });
-  }
 
   // A fake home stands in for a live loop. --selftest has to leave its log,
   // lock and heartbeat byte-identical, or a test line can stop the real watcher.

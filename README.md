@@ -74,7 +74,19 @@ Beyond the routing, the parts that matter in practice:
   changes, status lines, verdicts, kills and playbook decisions. It does not
   log a line on every poll. Set `AGENT_LOOP_WATCHER_VERBOSE=off` to keep it
   quiet. `AGENT_LOOP_WATCHER_NARRATE` can also explain those events in a Claude
-  Code session for this workspace (`off` by default). The report is
+  Code session for this workspace (`off` by default). The session opens in an
+  editor tab beside the current one. A later turn replaces that tab when you
+  are not reading it, so the new text loads. A tab you are reading stays put
+  until a later turn. Closing it leaves it closed. The Claude sidebar does
+  not load turns the watcher appends, and a session it is already showing is
+  not opened again as a new tab, so narration stays in the editor. Every open
+  passes a programmatic option, so the chat input does not take the cursor
+  and your Claude location setting stays as it is. If Claude does not trust
+  this folder, the Output channel and the watcher log say once per dispatcher
+  run to open the folder in Claude Code and accept the trust prompt. The
+  watcher does not accept it for you. **Agent Loop: Test watcher narration**
+  sends two short test batches about 20 seconds apart on its own session,
+  including while narration is off. The report is
   `~/.agent-loop-watcher-report.md`.
 - **Reviewers only ever see the task's own work.** The review diff is taken from the merge base
   with the base branch, never from its moving tip. A hotfix landing on `main` while a task is open
@@ -194,6 +206,7 @@ reads but the example never documents fails the build.
 | **Agent Loop: Recover unsafe stop** | Commit preserved sandbox work after an unsafe-child stop, if no descendant is still alive. |
 | **Agent Loop: Open the watcher report** | What the watcher last decided, and what to do next. |
 | **Agent Loop: Show watcher activity** | Open the Agent Loop Watcher output channel. |
+| **Agent Loop: Test watcher narration** | Send two test batches, about 20 seconds apart, through the narration path. |
 
 ---
 

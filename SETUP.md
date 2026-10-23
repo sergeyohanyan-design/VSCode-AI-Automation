@@ -310,7 +310,15 @@ it). **Agent Loop: Show watcher activity** opens that channel.
 Claude Code session for this folder. The default is `off`. A match is sent at
 once. Other events wait `AGENT_LOOP_WATCHER_NARRATE_MIN_S` seconds (default
 300) and share the hourly Claude cap. A failed narration is logged and the
-playbook keeps going.
+playbook keeps going. The session opens in an editor tab beside the current
+one, and a later turn replaces that tab when it is not the tab you are
+reading. The Claude sidebar does not load turns appended from the watcher, so
+narration does not use it. If Claude has not trusted this folder, the Output
+channel and `~/.agent-loop-watcher.log` say once per run to open the folder in
+Claude Code and accept the trust prompt. The watcher never accepts trust
+itself. **Agent Loop: Test watcher narration** sends two plain test batches
+about 20 seconds apart. It uses its own session and works while narration is
+off.
 
 ---
 

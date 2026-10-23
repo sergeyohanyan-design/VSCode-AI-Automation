@@ -1469,6 +1469,27 @@ async function watcherChecks() {
   assert.ok(firstPrompt.includes('Split the task.'));
   assert.equal(watcher.narrationPrompt([{ text: 'task1 → coding' }], { first: false }), 'task1 → coding');
 
+  const kept = { viewType: 'mainThreadWebview-claudeVSCodePanel', label: 'kept' };
+  const added = { viewType: 'claudeVSCodePanel', label: 'added' };
+  const otherView = { viewType: 'mainThreadWebview-markdown.preview', label: 'note' };
+  const second = { input: { viewType: 'claudeVSCodePanel' }, label: 'second' };
+  assert.equal(watcher.findNewClaudeTab([kept], [kept]), null);
+  assert.equal(watcher.findNewClaudeTab([kept], [kept, added]), added);
+  assert.equal(watcher.findNewClaudeTab([kept], [kept, otherView]), null);
+  assert.equal(watcher.findNewClaudeTab([kept], [kept, added, second]), null);
+  assert.equal(watcher.isClaudePanelTab(otherView), false);
+  assert.equal(watcher.narrationSurfaceAction({}), 'open');
+  assert.equal(watcher.narrationSurfaceAction({ presented: true, tracked: false }), 'open');
+  assert.equal(watcher.narrationSurfaceAction({ presented: true, tracked: true, open: true, focused: false }), 'refresh');
+  assert.equal(watcher.narrationSurfaceAction({ presented: true, tracked: true, open: true, focused: true }), 'defer');
+  assert.equal(watcher.narrationSurfaceAction({ presented: true, tracked: true, open: false }), 'leave');
+  assert.equal(watcher.narrationTrustFailure('this workspace has not been trusted'), true);
+  assert.equal(watcher.narrationTrustFailure('exit 1'), false);
+  assert.ok(watcher.NARRATION_TRUST_LINE.includes('accept the trust prompt'));
+  assert.equal(watcher.copyNarration({ trustNoted: true }).trustNoted, true);
+  assert.equal(watcher.emptyNarration().trustNoted, false);
+  assert.equal(watcher.forgetRun({ narration: { trustNoted: true } }).narration.trustNoted, false);
+
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-loop-session-'));
   try {
     const projectDir = path.join(sessionRoot, 'slug');

@@ -336,7 +336,7 @@ function claudeOnPath() {
 function emptyNarration() {
   return {
     sessionId: null, stamp: null, lastSentAt: null, pending: [],
-    budgetNotedAt: null, runId: null,
+    budgetNotedAt: null, runId: null, trustNoted: false,
   };
 }
 
@@ -352,6 +352,7 @@ function copyNarration(value) {
     pending: Array.isArray(n.pending) ? n.pending.slice(-NARRATION_PENDING_CAP) : [],
     budgetNotedAt: Number.isFinite(n.budgetNotedAt) ? n.budgetNotedAt : null,
     runId: typeof n.runId === 'string' && n.runId ? n.runId : null,
+    trustNoted: n.trustNoted === true,
   };
 }
 
@@ -1651,6 +1652,47 @@ function narrationPrompt(items, { first = false } = {}) {
   return parts.join('\n');
 }
 
+const CLAUDE_PANEL_VIEW = 'claudeVSCodePanel';
+const NARRATION_TRUST_LINE = 'Open this folder in Claude Code once and accept the trust prompt.';
+
+function claudePanelViewType(tab) {
+  if (!tab || typeof tab !== 'object') return '';
+  const input = tab.input && typeof tab.input === 'object' ? tab.input.viewType : '';
+  return String(tab.viewType || input || '');
+}
+
+function isClaudePanelTab(tab) {
+  return claudePanelViewType(tab).endsWith(CLAUDE_PANEL_VIEW);
+}
+
+// `before` and `after` are tab objects. Identity is the match. One new Claude
+// panel tab is that tab. None, a different view type, or two new Claude tabs
+// is no result — two new tabs are ambiguous.
+function findNewClaudeTab(before, after) {
+  const prior = new Set(before || []);
+  const seen = new Set();
+  const added = [];
+  for (const tab of after || []) {
+    if (!tab || prior.has(tab) || seen.has(tab) || !isClaudePanelTab(tab)) continue;
+    seen.add(tab);
+    added.push(tab);
+  }
+  return added.length === 1 ? added[0] : null;
+}
+
+// open: show the session. refresh: close and open the editor tab again.
+// defer: the human is in that tab. leave: they closed it.
+function narrationSurfaceAction({ presented = false, tracked = false, open = false, focused = false } = {}) {
+  if (!presented || !tracked) return 'open';
+  if (!open) return 'leave';
+  if (focused) return 'defer';
+  return 'refresh';
+}
+
+function narrationTrustFailure(text) {
+  return /has not been trusted/i.test(String(text || ''));
+}
+
 module.exports = {
   PHASE2, ACTIONS, DEFAULT_CLAUDE_ARGS, DEFAULT_CLAUDE_CMD, CLAUDE_TIMEOUT_MS,
   WATCHER_START_GRACE_MS, NARRATION_PENDING_CAP,
@@ -1666,4 +1708,6 @@ module.exports = {
   watcherVerbose, narrationMode, narrationMinMs, narrationArgs, narrationCommand,
   narrationSessionId, sessionChangedByOther, findSessionStat, notableEvents,
   unmatchedNotable, planNarration, narrationPrompt, copyNarration, emptyNarration,
+  isClaudePanelTab, findNewClaudeTab, narrationSurfaceAction, narrationTrustFailure,
+  NARRATION_TRUST_LINE,
 };

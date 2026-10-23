@@ -241,7 +241,14 @@ one file, not a feature spanning three layers. Then explain to me, briefly:
   playbook match is sent at once. Other events are batched, at least
   `AGENT_LOOP_WATCHER_NARRATE_MIN_S` seconds apart (default 300), and they
   share the hourly Claude cap. A narration failure is logged. The playbook
-  still runs.
+  still runs. The session opens in an editor tab beside the current one. A
+  later turn replaces that tab when the human is not reading it. The Claude
+  sidebar does not load turns the watcher appends, so narration does not use
+  the sidebar. If Claude has not trusted the folder, the Output channel and
+  the watcher log say once per dispatcher run to open the folder in Claude
+  Code and accept the trust prompt. Nothing accepts that prompt automatically.
+  The command Agent Loop: Test watcher narration sends two test batches about
+  20 seconds apart on its own session, and it works while narration is off.
 - Deploy is never automated. The loop stops at `committed`.
 
 Finally, give me a short summary of everything that was configured, and anything

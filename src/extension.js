@@ -358,6 +358,9 @@ let watcherArmedAt = 0;
 let watcherSawDispatcher = false;
 let watcherChannel = null;
 let narrationFlight = false;
+let narrationTestRunning = false;
+const narrationSurfaces = new Map();
+const narrationTrustRuns = new Set();
 
 function armWatcher() {
   watcherArmedAt = Date.now();
@@ -756,28 +759,210 @@ function watcherSay(line) {
   watcherChannel.appendLine(String(line));
 }
 
-function narrationSurface(sessionId) {
-  const groups = vscode.window && vscode.window.tabGroups && vscode.window.tabGroups.all || [];
-  let open = false;
-  let active = false;
-  for (const group of groups) {
-    for (const tab of group.tabs || []) {
-      let blob = tab.label || '';
-      try { blob += JSON.stringify(tab.input || {}); } catch { /* not serialisable */ }
-      if (!blob.includes(sessionId)) continue;
-      open = true;
-      if (tab.isActive) active = true;
-    }
-  }
-  return { open, active };
+function emptySurface() {
+  return { presented: false, tab: null, label: '', viewColumn: undefined };
 }
 
-function openNarration(sessionId, preserveFocus) {
-  const column = vscode.ViewColumn && vscode.ViewColumn.Beside;
-  const programmatic = preserveFocus ? { programmatic: 'panel' } : undefined;
+function surfaceFor(sessionId) {
+  let surface = narrationSurfaces.get(sessionId);
+  if (!surface) {
+    surface = emptySurface();
+    narrationSurfaces.set(sessionId, surface);
+  }
+  return surface;
+}
+
+function listAllTabs() {
+  const groups = vscode.window && vscode.window.tabGroups && vscode.window.tabGroups.all || [];
+  const tabs = [];
+  for (const group of groups) {
+    for (const tab of group.tabs || []) tabs.push(tab);
+  }
+  return tabs;
+}
+
+function groupOf(tab) {
+  const groups = vscode.window && vscode.window.tabGroups && vscode.window.tabGroups.all || [];
+  for (const group of groups) {
+    if ((group.tabs || []).includes(tab)) return group;
+  }
+  return null;
+}
+
+function findTrackedTab(surface) {
+  if (!surface) return null;
+  if (surface.tab) {
+    const group = groupOf(surface.tab);
+    if (group) return { tab: surface.tab, group };
+  }
+  if (!surface.label) return null;
+  const hits = [];
+  const groups = vscode.window && vscode.window.tabGroups && vscode.window.tabGroups.all || [];
+  for (const group of groups) {
+    if (surface.viewColumn != null && group.viewColumn !== surface.viewColumn) continue;
+    for (const tab of group.tabs || []) {
+      if (!watcher.isClaudePanelTab(tab) || tab.label !== surface.label) continue;
+      hits.push({ tab, group });
+    }
+  }
+  return hits.length === 1 ? hits[0] : null;
+}
+
+function narrationTabState(surface) {
+  const found = findTrackedTab(surface);
+  const focusedGroup = vscode.window && vscode.window.tabGroups && vscode.window.tabGroups.activeTabGroup;
+  return {
+    presented: !!(surface && surface.presented),
+    tracked: !!(surface && (surface.tab || surface.label)),
+    open: !!found,
+    focused: !!(found && focusedGroup && found.group === focusedGroup && found.tab.isActive),
+    found,
+  };
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function captureEditorPlace() {
+  const editor = vscode.window && vscode.window.activeTextEditor;
+  return editor ? { editor, viewColumn: editor.viewColumn, selection: editor.selection } : null;
+}
+
+async function restoreEditorPlace(place, openedTab) {
+  if (!place || !openedTab || !place.editor || !vscode.window || typeof vscode.window.showTextDocument !== 'function') return;
+  const active = vscode.window.tabGroups && vscode.window.tabGroups.activeTabGroup
+    && vscode.window.tabGroups.activeTabGroup.activeTab;
+  if (active !== openedTab) return;
+  await vscode.window.showTextDocument(place.editor.document, {
+    viewColumn: place.viewColumn,
+    selection: place.selection,
+    preview: false,
+  });
+}
+
+// programmatic is always set, so the open does not focus the chat input and
+// does not change Claude's preferred location. The sidebar is not used: it
+// does not reload a transcript another process appended, and a session it
+// already shows is not opened again as a new editor tab.
+function openNarrationEditor(sessionId, viewColumn) {
   return vscode.commands.executeCommand(
-    'claude-vscode.editor.open', sessionId, undefined, column, undefined, true, programmatic,
+    'claude-vscode.editor.open',
+    sessionId,
+    undefined,
+    viewColumn,
+    undefined,
+    true,
+    { programmatic: 'panel' },
   );
+}
+
+async function waitForNewClaudeTab(before, extra) {
+  const deadline = Date.now() + 2000;
+  while (Date.now() <= deadline) {
+    const pool = listAllTabs();
+    for (const tab of extra) {
+      if (!pool.includes(tab)) pool.push(tab);
+    }
+    const found = watcher.findNewClaudeTab(before, pool);
+    if (found) return found;
+    await delay(100);
+  }
+  return null;
+}
+
+async function presentNarration(sessionId, surface, say) {
+  const described = narrationTabState(surface);
+  const action = watcher.narrationSurfaceAction(described);
+  if (action === 'leave') {
+    say('refresh skipped: tab was closed');
+    return;
+  }
+  if (action === 'defer') {
+    say('refresh skipped: tab is focused');
+    return;
+  }
+  const before = listAllTabs();
+  const opened = [];
+  let events = null;
+  try {
+    if (vscode.window && vscode.window.tabGroups && typeof vscode.window.tabGroups.onDidChangeTabs === 'function') {
+      events = vscode.window.tabGroups.onDidChangeTabs(change => {
+        for (const tab of change.opened || []) opened.push(tab);
+      });
+    }
+  } catch { /* a missing event still leaves the poll */ }
+  const place = captureEditorPlace();
+  try {
+    let column = vscode.ViewColumn && vscode.ViewColumn.Beside;
+    if (action === 'refresh' && described.found) {
+      column = described.found.group.viewColumn;
+      surface.tab = null;
+      surface.label = '';
+      try {
+        await vscode.window.tabGroups.close(described.found.tab, true);
+      } catch (e) {
+        say(`refresh skipped: ${e.message}`);
+        return;
+      }
+      const gone = Date.now() + 500;
+      while (Date.now() < gone && listAllTabs().includes(described.found.tab)) await delay(50);
+    } else if (surface.viewColumn != null) {
+      column = surface.viewColumn;
+    }
+    await openNarrationEditor(sessionId, column);
+    const tab = await waitForNewClaudeTab(before, opened);
+    if (!tab) {
+      say(action === 'refresh' ? 'refresh skipped: no editor tab appeared' : 'opened: no editor tab appeared');
+      return;
+    }
+    const group = groupOf(tab);
+    surface.presented = true;
+    surface.tab = tab;
+    surface.label = tab.label || '';
+    surface.viewColumn = group ? group.viewColumn : column;
+    say(action === 'refresh' ? 'refreshed' : 'opened: tab');
+    try { await restoreEditorPlace(place, tab); } catch { /* focus restore is best-effort */ }
+  } catch (e) {
+    say(`open failed: ${e.message}`);
+  } finally {
+    try { if (events) events.dispose(); } catch { /* already disposed */ }
+  }
+}
+
+function claudeProjectsDir() {
+  return path.join(os.homedir(), '.claude', 'projects');
+}
+
+async function deliverNarrationTurn({ sessionId, resume, input, cwd, paths, surface, say, trustNoted, markTrust }) {
+  const command = watcher.narrationCommand({ sessionId, resume }).map(watcher.quoteCmdArg).join(' ');
+  let result;
+  try {
+    result = await watcher.spawnCaptured(command, {
+      input, cwd, timeoutMs: watcher.CLAUDE_TIMEOUT_MS,
+    });
+  } catch (e) {
+    const why = e && e.message ? e.message : 'narration failed';
+    say(`failed: ${why}`);
+    try { watcher.appendLog(paths.watcherLog, `narration failed: ${why}`); } catch { /* log is best-effort */ }
+    return { ok: false };
+  }
+  if (!result.ok) {
+    const blob = `${result.why || ''}\n${result.err || ''}\n${result.text || ''}`;
+    if (watcher.narrationTrustFailure(blob)) {
+      if (!trustNoted()) markTrust();
+      return { ok: false, trust: true };
+    }
+    const why = result.why || 'narration failed';
+    say(`failed: ${why}`);
+    try { watcher.appendLog(paths.watcherLog, `narration failed: ${why}`); } catch { /* log is best-effort */ }
+    return { ok: false };
+  }
+  const stat = watcher.findSessionStat(claudeProjectsDir(), sessionId);
+  say('appended');
+  try { await presentNarration(sessionId, surface, say); }
+  catch (e) { say(`open failed: ${e.message}`); }
+  return { ok: true, stat };
 }
 
 function narrationIncoming(decision, events, lines) {
@@ -837,6 +1022,7 @@ function scheduleNarration(env, paths, facts, decision, events) {
   if (narration.runId && runId && narration.runId !== runId) {
     narration.sessionId = null;
     narration.stamp = null;
+    narration.trustNoted = false;
   }
   const projects = path.join(os.homedir(), '.claude', 'projects');
   if (narration.sessionId && watcher.sessionChangedByOther(
@@ -851,46 +1037,139 @@ function scheduleNarration(env, paths, facts, decision, events) {
   const sessionId = narration.sessionId || watcher.narrationSessionId();
   const first = !narration.sessionId;
   const prompt = watcher.narrationPrompt(plan.items, { first });
-  const command = watcher.narrationCommand({ sessionId, resume: !first }).map(watcher.quoteCmdArg).join(' ');
   narration.pending = [];
   watcherMemory.narration = narration;
   narrationFlight = true;
+  const say = (line) => watcherSay(`narration ${line}`);
+  if (first) say('session created');
   let child;
   try {
-    child = watcher.spawnCaptured(command, {
-    input: prompt, cwd, timeoutMs: watcher.CLAUDE_TIMEOUT_MS,
-  }).then(result => {
-    if (!watcherMemory) return;
-    const state = watcher.copyNarration(watcherMemory.narration);
-    watcherMemory.claudeCalls = [...(watcherMemory.claudeCalls || []), Date.now()];
-    if (!result.ok) {
-      const why = result.why || result.err || 'narration failed';
-      watcherSay(`narration failed: ${why}`);
-      try { watcher.appendLog(paths.watcherLog, `narration failed: ${why}`); } catch { /* log is best-effort */ }
-      watcherMemory.narration = state;
-    } else {
-      state.sessionId = sessionId;
-      state.runId = runId || state.runId;
-      state.lastSentAt = Date.now();
-      const stat = watcher.findSessionStat(projects, sessionId);
-      if (stat.exists) state.stamp = { size: stat.size, mtimeMs: stat.mtimeMs };
-      watcherMemory.narration = state;
-      const surface = narrationSurface(sessionId);
-      if (first || (surface.open && surface.active)) {
-        void openNarration(sessionId, !first).catch(e => watcherSay(`narration open failed: ${e.message}`));
+    child = deliverNarrationTurn({
+      sessionId,
+      resume: !first,
+      input: prompt,
+      cwd,
+      paths,
+      surface: surfaceFor(sessionId),
+      say,
+      trustNoted: () => narrationTrustRuns.has(runId || '')
+        || !!(watcherMemory && watcherMemory.narration && watcherMemory.narration.trustNoted),
+      markTrust: () => {
+        narrationTrustRuns.add(runId || '');
+        if (!watcherMemory) return;
+        const state = watcher.copyNarration(watcherMemory.narration);
+        if (state.trustNoted) return;
+        state.trustNoted = true;
+        watcherMemory.narration = state;
+        watcherSay(watcher.NARRATION_TRUST_LINE);
+        try { watcher.appendLog(paths.watcherLog, watcher.NARRATION_TRUST_LINE); } catch { /* log is best-effort */ }
+        try { watcher.saveMemory(paths.watcherState, watcherMemory); } catch { /* state file is best-effort */ }
+      },
+    }).then(result => {
+      if (!watcherMemory) return;
+      const state = watcher.copyNarration(watcherMemory.narration);
+      if (narrationTrustRuns.has(runId || '')) state.trustNoted = true;
+      watcherMemory.claudeCalls = [...(watcherMemory.claudeCalls || []), Date.now()];
+      if (result.ok) {
+        state.sessionId = sessionId;
+        state.runId = runId || state.runId;
+        state.lastSentAt = Date.now();
+        if (result.stat && result.stat.exists) state.stamp = { size: result.stat.size, mtimeMs: result.stat.mtimeMs };
       }
-    }
-    try { watcher.saveMemory(paths.watcherState, watcherMemory); } catch { /* state file is best-effort */ }
-  }).catch(e => {
-    watcherSay(`narration failed: ${e.message}`);
-    try { watcher.appendLog(paths.watcherLog, `narration failed: ${e.message}`); } catch { /* log is best-effort */ }
-  }).finally(() => { narrationFlight = false; });
+      watcherMemory.narration = state;
+      try { watcher.saveMemory(paths.watcherState, watcherMemory); } catch { /* state file is best-effort */ }
+    }).catch(e => {
+      watcherSay(`narration failed: ${e.message}`);
+      try { watcher.appendLog(paths.watcherLog, `narration failed: ${e.message}`); } catch { /* log is best-effort */ }
+    }).finally(() => { narrationFlight = false; });
   } catch (e) {
     narrationFlight = false;
     watcherSay(`narration failed: ${e.message}`);
     try { watcher.appendLog(paths.watcherLog, `narration failed: ${e.message}`); } catch { /* log is best-effort */ }
   }
   void child;
+}
+
+const NARRATION_TEST_GAP_MS = 20 * 1000;
+
+function narrationTestText(batch) {
+  return [
+    'Agent Loop narration test.',
+    `This is batch ${batch} of 2.`,
+    'It is a test. It is not from the dispatcher log.',
+  ].join(' ');
+}
+
+async function testWatcherNarration() {
+  if (narrationTestRunning) {
+    watcherSay('narration test: already running');
+    return;
+  }
+  narrationTestRunning = true;
+  const say = (line) => watcherSay(`narration test: ${line}`);
+  const surface = emptySurface();
+  const local = { trustNoted: false, sessionId: null, stamp: null };
+  try {
+    if (!watcherChannel) watcherChannel = vscode.window.createOutputChannel('Agent Loop Watcher');
+    watcherChannel.show(true);
+    const cwd = repoRoot();
+    if (!cwd) {
+      say('no workspace folder');
+      return;
+    }
+    const paths = statePaths();
+    local.sessionId = watcher.narrationSessionId();
+    say('session created');
+    const runBatch = async (batch, resume) => deliverNarrationTurn({
+      sessionId: local.sessionId,
+      resume,
+      input: narrationTestText(batch),
+      cwd,
+      paths,
+      surface,
+      say,
+      trustNoted: () => local.trustNoted,
+      markTrust: () => {
+        if (local.trustNoted) return;
+        local.trustNoted = true;
+        watcherSay(watcher.NARRATION_TRUST_LINE);
+        try { watcher.appendLog(paths.watcherLog, watcher.NARRATION_TRUST_LINE); } catch { /* log is best-effort */ }
+      },
+    });
+    const first = await runBatch(1, false);
+    if (first.stat && first.stat.exists) local.stamp = { size: first.stat.size, mtimeMs: first.stat.mtimeMs };
+    if (!first.ok) {
+      say('stopped');
+      return;
+    }
+    say('waiting 20s');
+    await delay(NARRATION_TEST_GAP_MS);
+    if (watcher.sessionChangedByOther(
+      local.stamp, watcher.findSessionStat(claudeProjectsDir(), local.sessionId),
+    )) {
+      const note = 'narration session was edited outside the watcher; starting a new one';
+      watcherSay(note);
+      try { watcher.appendLog(paths.watcherLog, note); } catch { /* log is best-effort */ }
+      local.sessionId = watcher.narrationSessionId();
+      local.stamp = null;
+      surface.presented = false;
+      surface.tab = null;
+      surface.label = '';
+      surface.viewColumn = undefined;
+      say('session created');
+      const again = await runBatch(2, false);
+      if (!again.ok) say('stopped');
+      else say('finished');
+      return;
+    }
+    const second = await runBatch(2, true);
+    if (!second.ok) say('stopped');
+    else say('finished');
+  } catch (e) {
+    say(`failed: ${e.message}`);
+  } finally {
+    narrationTestRunning = false;
+  }
 }
 
 function openWatcherReport() {
@@ -918,6 +1197,7 @@ function activate(context) {
       if (!watcherChannel) watcherChannel = vscode.window.createOutputChannel('Agent Loop Watcher');
       watcherChannel.show(false);
     }),
+    vscode.commands.registerCommand('agentLoop.testWatcherNarration', () => testWatcherNarration()),
   );
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);

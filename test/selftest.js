@@ -1510,8 +1510,6 @@ async function watcherChecks() {
   const forgottenNarration = watcher.forgetRun({ narration: { lastSentAt: 10, pending: [{ text: 'x' }] } });
   assert.equal(forgottenNarration.narration.lastSentAt, null);
   assert.deepEqual(forgottenNarration.narration.pending, []);
-  assert.equal(watcher.narrationDebugEnabled('1'), true);
-  assert.equal(watcher.narrationDebugEnabled('off'), false);
   const unowned = watcher.claimWatcher({ owner: null, now: 1000, pid: 10, staleMs: 90000 });
   assert.equal(unowned.act, true);
   assert.equal(unowned.tookOver, true);

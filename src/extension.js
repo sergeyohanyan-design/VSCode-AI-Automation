@@ -28,7 +28,6 @@ const STATE_ENV_KEYS = new Set([
   'AGENT_LOOP_WATCHER_REPORT', 'AGENT_LOOP_WATCHER_LOG', 'AGENT_LOOP_WATCHER_STATE',
   'AGENT_LOOP_WATCHER_CODER_LOGS', 'AGENT_LOOP_WATCHER_VERBOSE',
   'AGENT_LOOP_WATCHER_NARRATE', 'AGENT_LOOP_WATCHER_NARRATE_MIN_S',
-  'AGENT_LOOP_WATCHER_NARRATE_DEBUG',
   'AGENT_LOOP_IMPLEMENT_TIMEOUT_S',
   'AGENT_LOOP_REVIEW_TIMEOUT_S', 'AGENT_LOOP_VERIFY_TIMEOUT_S', 'AGENT_LOOP_VERIFY_SEED_DIRS',
 ]);
@@ -359,7 +358,6 @@ let watcherArmedAt = 0;
 let watcherSawDispatcher = false;
 let watcherChannel = null;
 let narrationFlight = false;
-let narrationTestRunning = false;
 let watcherOwnerNoted = false;
 let watcherOwnsFile = false;
 
@@ -825,13 +823,9 @@ function showNarration(reveal) {
   watcherChannel.show(reveal.preserveFocus !== false);
 }
 
-async function deliverNarration({ input, paths, debug = false, reveal = null }) {
+async function deliverNarration({ input, paths, reveal = null }) {
   const command = watcher.narrationCommand().map(watcher.quoteCmdArg).join(' ');
   const cwd = watcher.narrationCwd();
-  if (debug) {
-    watcherSay(`narration debug: command: ${command}`);
-    watcherSay(`narration debug: cwd: ${cwd}`);
-  }
   let result;
   try {
     result = await watcher.spawnCaptured(command, {
@@ -842,10 +836,6 @@ async function deliverNarration({ input, paths, debug = false, reveal = null }) 
     noteNarrationFailure(paths, why);
     showNarration(reveal);
     return { ok: false };
-  }
-  if (debug) {
-    watcherSay(`narration debug: exit ${result.code}`);
-    watcherSay(`narration debug: stderr: ${String(result.err || '').slice(0, 300)}`);
   }
   if (!result.ok) {
     noteNarrationFailure(paths, result.why || 'narration failed');
@@ -914,7 +904,6 @@ function scheduleNarration(env, paths, facts, decision, events) {
     child = deliverNarration({
       input: prompt,
       paths,
-      debug: watcher.narrationDebugEnabled(env.AGENT_LOOP_WATCHER_NARRATE_DEBUG),
       reveal,
     }).then(result => {
       if (!watcherMemory) return;
@@ -931,29 +920,6 @@ function scheduleNarration(env, paths, facts, decision, events) {
     noteNarrationFailure(paths, e.message);
   }
   void child;
-}
-
-async function testWatcherNarration() {
-  if (narrationTestRunning) {
-    watcherSay('narration test: already running');
-    return;
-  }
-  narrationTestRunning = true;
-  try {
-    if (!vscode.window || typeof vscode.window.createOutputChannel !== 'function') return;
-    if (!watcherChannel) watcherChannel = vscode.window.createOutputChannel('Agent Loop Watcher');
-    watcherChannel.show(true);
-    const paths = statePaths();
-    const debug = watcher.narrationDebugEnabled(loadStateEnv().AGENT_LOOP_WATCHER_NARRATE_DEBUG);
-    const input = watcher.narrationPrompt([{
-      text: 'Agent Loop narration test. This is a test. It is not from the dispatcher log.',
-    }]);
-    await deliverNarration({ input, paths, debug, reveal: null });
-  } catch (e) {
-    noteNarrationFailure(statePaths(), e.message);
-  } finally {
-    narrationTestRunning = false;
-  }
 }
 
 function openWatcherReport() {
@@ -981,7 +947,6 @@ function activate(context) {
       if (!watcherChannel) watcherChannel = vscode.window.createOutputChannel('Agent Loop Watcher');
       watcherChannel.show(false);
     }),
-    vscode.commands.registerCommand('agentLoop.testWatcherNarration', () => testWatcherNarration()),
   );
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);

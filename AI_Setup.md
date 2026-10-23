@@ -255,11 +255,6 @@ one file, not a feature spanning three layers. Then explain to me, briefly:
   used 2 input tokens, 10,422 cache-creation tokens and 73,283 cache-read
   tokens. The same call with `--safe-mode` used 2, 392 and 1,647, and a
   subscription login still worked, so narration passes `--safe-mode`.
-  `AGENT_LOOP_WATCHER_NARRATE_DEBUG=1` logs the command, the working
-  directory, the exit code, and the first 300 characters of stderr. The
-  command Agent Loop: Test watcher narration sends one test batch through
-  that path, says that it is a test, shows the channel, and writes the block
-  or the failure. It works while narration is off.
 - Deploy is never automated. The loop stops at `committed`.
 
 Finally, give me a short summary of everything that was configured, and anything

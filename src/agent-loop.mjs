@@ -35,7 +35,7 @@
  *   one read per candidate parent, and needs no agent, so it runs whatever is available.
  *
  * When Claude is available, each pass first does PM housekeeping before coding new work:
- *   - verify + land Codex-approved parked tasks in dependency order (parents before children),
+ *   - verify + land parked approved tasks in dependency order (parents before children),
  *   - drain the Review queue through Codex (if up) → Approved on pass,
  *   - then start the normal coding lane.
  * If Claude is down, Approved stays parked while the degraded coding lane continues.
@@ -1314,12 +1314,31 @@ async function selftest() {
 
   // A Codex-down landing is reviewed by Claude, so the commit record must name the reviewer that
   // actually ran — claiming "Codex approved" turns the board into a false audit trail, and the
-  // loop's whole invariant is that only reviewed work lands. Entries written as a bare SHA by an
-  // older run must still decode, with an unknown (never a defaulted) reviewer.
+  // loop's whole invariant is that only reviewed work lands. An adjudicated pass is Claude
+  // overruling a Codex FAIL, so the stored reviewer must not be codex. Entries written as a bare
+  // SHA, or as {sha, reviewer:'codex'}, by an older run must still decode. A missing reviewer
+  // stays unknown, never a defaulted name.
   // Mutates the in-memory map only — a selftest must never write the live approved-SHA file.
+  const adjReviewer = recordedReviewer('codex', true);
+  const codexReviewer = recordedReviewer('codex', false);
+  APPROVED_SHAS.set('selftest-attrib-adj', { sha: 'aaa1111', reviewer: adjReviewer });
+  APPROVED_SHAS.set('selftest-attrib-codex', { sha: 'bbb2222', reviewer: 'codex' });
   APPROVED_SHAS.set('selftest-attrib-new', { sha: 'abc1234', reviewer: 'claude' });
   APPROVED_SHAS.set('selftest-attrib-old', 'def5678');
-  const attribution = getApprovedSha('selftest-attrib-new') === 'abc1234'
+  const adjPhrase = approvalPhrase(getApprovedReviewer('selftest-attrib-adj'));
+  const codexPhrase = approvalPhrase(codexReviewer);
+  const attribution = adjReviewer !== 'codex'
+    && getApprovedReviewer('selftest-attrib-adj') === adjReviewer
+    && getApprovedSha('selftest-attrib-adj') === 'aaa1111'
+    && adjPhrase.includes('Claude')
+    && adjPhrase.toLowerCase().includes('adjudicat')
+    && adjPhrase.toLowerCase().includes('codex')
+    && !adjPhrase.startsWith('Codex')
+    && codexReviewer === 'codex'
+    && getApprovedReviewer('selftest-attrib-codex') === 'codex'
+    && getApprovedSha('selftest-attrib-codex') === 'bbb2222'
+    && codexPhrase === 'Codex approved'
+    && getApprovedSha('selftest-attrib-new') === 'abc1234'
     && getApprovedReviewer('selftest-attrib-new') === 'claude'
     && getApprovedSha('selftest-attrib-old') === 'def5678'
     && getApprovedReviewer('selftest-attrib-old') === null
@@ -1328,10 +1347,12 @@ async function selftest() {
     && approvalPhrase('grok') === 'Grok (self) approved'
     && approvalPhrase(null) === 'Approved (reviewer not recorded)'
     && !approvalPhrase('claude').includes('Codex');
+  APPROVED_SHAS.delete('selftest-attrib-adj');
+  APPROVED_SHAS.delete('selftest-attrib-codex');
   APPROVED_SHAS.delete('selftest-attrib-new');
   APPROVED_SHAS.delete('selftest-attrib-old');
   if (!attribution) console.log('  reviewer attribution probe: failed', {
-    sha: getApprovedSha('selftest-attrib-new'), claude: approvalPhrase('claude'), unknown: approvalPhrase(null),
+    adjReviewer, adjPhrase, codexPhrase, unknown: approvalPhrase(null),
   });
 
   // Idle must never kill a process that is still burning CPU (2026-09-21: 11 healthy rounds lost).
@@ -3491,11 +3512,25 @@ const setApprovedSha = (id, sha, reviewer = null) => { APPROVED_SHAS.set(id, { s
 const getApprovedSha = id => readApprovedEntry(id)?.sha || null;
 const getApprovedReviewer = id => readApprovedEntry(id)?.reviewer || null;
 const clearApprovedSha = id => { APPROVED_SHAS.delete(id); saveApprovedShas(); };
+// Stored when Claude's adjudication overrules a Codex FAIL. Never the string "codex":
+// later land comments and the moved-branch note read this value back as who approved.
+export const ADJUDICATED_REVIEWER = 'claude-adjudication';
+export const recordedReviewer = (reviewer, adjudicated) =>
+  (adjudicated ? ADJUDICATED_REVIEWER : (reviewer || null));
 // Single source of truth for how a reviewer is named in comments. "(self)" on Grok because a
 // Grok-reviewed branch was usually also Grok-coded.
-const reviewerLabel = r => (!r ? null : r === 'grok' ? 'Grok (self)' : r[0].toUpperCase() + r.slice(1));
+const reviewerLabel = r => {
+  if (!r) return null;
+  if (r === 'grok') return 'Grok (self)';
+  if (r === ADJUDICATED_REVIEWER) return 'Claude adjudication';
+  return r[0].toUpperCase() + r.slice(1);
+};
 // An unrecorded reviewer must read as unknown, never as a default name.
-const approvalPhrase = r => (reviewerLabel(r) ? `${reviewerLabel(r)} approved` : 'Approved (reviewer not recorded)');
+// An adjudicated pass must say Claude overruled Codex, not that Codex approved.
+const approvalPhrase = r => {
+  if (r === ADJUDICATED_REVIEWER) return 'Claude adjudicated a Codex failure';
+  return reviewerLabel(r) ? `${reviewerLabel(r)} approved` : 'Approved (reviewer not recorded)';
+};
 
 // ---------- working-tree ownership guard ----------
 // The dispatcher assumes it OWNS the tree: it runs `reset --hard` before each lane and `add -A`
@@ -4076,22 +4111,21 @@ async function reviewAndResolve(t, reviewer, onPass, escalateWithClaude, claudeU
 
     if (verdict.verdict === 'pass') {
       const passAction = reviewPassAction(reviewer, onPass);
+      const recorded = recordedReviewer(reviewer, adjudicated);
       if (passAction === 'approved') {
-        setApprovedSha(id, tipBefore, reviewer);
+        setApprovedSha(id, tipBefore, recorded);
         await setStatus(id, S.approved);
-        const approvalSource = adjudicated
-          ? 'Claude adjudication disproved Codex blockers'
-          : `${who} approved`;
+        const approvalSource = approvalPhrase(recorded);
         await tryComment(id, `🟢 ${approvalSource} at \`${tipBefore.slice(0, 8)}\` → **approved** for deterministic verification/commit on the next round. Reviewed SHA persisted; dependent tasks are now unblocked.`);
         return S.approved;
       }
       if (passAction === 'commit') {
         // Dispose the review sandbox BEFORE land so verify can open a fresh detached clone at this SHA.
         const reviewedSha = tipBefore;
-        setApprovedSha(id, reviewedSha, reviewer); // durable even if land is deferred mid-push
+        setApprovedSha(id, reviewedSha, recorded); // durable even if land is deferred mid-push
         await co.wt.dispose();
         co.wt = null;
-        return land(t, { branch: co.branch, reviewedSha, reviewer }, escalateWithClaude && claudeUp);
+        return land(t, { branch: co.branch, reviewedSha, reviewer: recorded }, escalateWithClaude && claudeUp);
       }
       await tryComment(id, `${emoji} ${who} approved; awaiting Codex before commit → parked on **in review**.`); return setStatus(id, S.review);
     }
@@ -4364,7 +4398,7 @@ async function land(t, { branch, reviewedSha, reviewer = null }, escalateOnCap =
   const sha = reviewedSha.slice(0, 7);
   if (push.code !== 0) {
     const rounds = bumpRounds(id);
-    setApprovedSha(id, reviewedSha); // keep the reviewed pin for retry
+    setApprovedSha(id, reviewedSha, reviewer); // keep the reviewed pin, and who approved it, for retry
     await tryComment(id, `🟣 **PM** — ${approvedBy}${VERIFY ? ' + verify green' : ''} and \`${sha}\` is committed on \`${branch}\`, but **push FAILED** (round ${rounds}/${MAX_ROUNDS}). Reviewed SHA kept.\n\`\`\`\n${push.out.slice(-600)}\n\`\`\``);
     log(`  ${id} push FAILED (${sha} local only) → round ${rounds}/${MAX_ROUNDS}`);
     if (rounds >= MAX_ROUNDS) {
@@ -4962,7 +4996,7 @@ async function pass() {
   if (!canStartNewWork()) return;   // the flag may have arrived during the probe
 
   if (C) {
-    // Claude housekeeping runs FIRST: land every Codex-approved SHA in dependency order. If an
+    // Claude housekeeping runs FIRST: land every parked approved SHA in dependency order. If an
     // ancestor fails this round, park its descendants; unrelated approved roots may still land.
     const failedApproved = new Set();
     for (let i = 0; i < approved.length; i++) {
@@ -4997,9 +5031,12 @@ async function pass() {
           continue;
         }
         if (tip !== pinned) {
-          const approver = reviewerLabel(getApprovedReviewer(t.id));
+          const storedReviewer = getApprovedReviewer(t.id);
+          const since = storedReviewer === ADJUDICATED_REVIEWER
+            ? "Claude's adjudication of a Codex failure"
+            : (reviewerLabel(storedReviewer) ? `${reviewerLabel(storedReviewer)}'s approval` : 'the approval');
           clearApprovedSha(t.id);
-          await tryComment(t.id, `🟣 **PM** — branch \`${branch}\` moved since ${approver ? `${approver}'s` : 'the'} approval (\`${pinned.slice(0, 8)}\` → \`${tip.slice(0, 8)}\`) → **in review** (will not push unreviewed commits).`);
+          await tryComment(t.id, `🟣 **PM** — branch \`${branch}\` moved since ${since} (\`${pinned.slice(0, 8)}\` → \`${tip.slice(0, 8)}\`) → **in review** (will not push unreviewed commits).`);
           await setStatus(t.id, S.review);
           failedApproved.add(t.id);
           continue;
@@ -5157,7 +5194,9 @@ async function stubBranchFacts(repo, branch, base) {
   if (exists.code !== 0) return { branchExists: false, commits: null, hasRemote: false };
   const count = await gitAt(repo, `rev-list --count ${base}..${branch}`);
   const commits = count.code === 0 ? Number(count.out.trim()) : null;
-  const refs = await gitAt(repo, 'for-each-ref --format=%(refname) refs/remotes');
+  // Quote the format. Linux /bin/sh treats an unquoted %(refname) as a syntax error,
+  // so the remote check never ran and a stub with a remote copy looked local-only.
+  const refs = await gitAt(repo, 'for-each-ref --format="%(refname)" refs/remotes');
   const hasRemote = refs.code === 0 && refs.out.split(/\r?\n/).some(ref => ref.endsWith(`/${branch}`));
   return { branchExists: true, commits, hasRemote };
 }

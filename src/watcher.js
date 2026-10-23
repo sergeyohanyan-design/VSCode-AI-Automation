@@ -1663,10 +1663,6 @@ function narrationReveal(reason) {
   return { show: reason === 'row', preserveFocus: true };
 }
 
-function narrationDebugEnabled(value) {
-  return /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
-}
-
 // One watcher per machine. A missing record, a dead pid, or a stale heartbeat
 // is a takeover. The same pid refreshes its heartbeat. A live fresh owner is
 // left alone.
@@ -1696,5 +1692,5 @@ module.exports = {
   watcherVerbose, narrationMode, narrationMinMs, narrationArgs, narrationCommand,
   narrationCwd, NARRATION_SAFE_MODE, notableEvents,
   unmatchedNotable, planNarration, narrationPrompt, narrationBlock, narrationReveal,
-  copyNarration, emptyNarration, narrationDebugEnabled, claimWatcher,
+  copyNarration, emptyNarration, claimWatcher,
 };

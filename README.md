@@ -93,11 +93,7 @@ Beyond the routing, the parts that matter in practice:
   that flag), used 2 input tokens, 10,422 cache-creation tokens and 73,283
   cache-read tokens. The same call with `--safe-mode` used 2, 392 and 1,647,
   and a subscription login still worked, so narration passes `--safe-mode`.
-  `AGENT_LOOP_WATCHER_NARRATE_DEBUG=1` logs the command, the working
-  directory, the exit code, and the first 300 characters of stderr.
-  **Agent Loop: Test watcher narration** sends one test batch through that
-  path, says that it is a test, and shows the channel. It works while
-  narration is off. The report is `~/.agent-loop-watcher-report.md`.
+  The report is `~/.agent-loop-watcher-report.md`.
 - **Reviewers only ever see the task's own work.** The review diff is taken from the merge base
   with the base branch, never from its moving tip. A hotfix landing on `main` while a task is open
   is not part of that task's diff, so no reviewer can fail a task for "reverting" work it never
@@ -195,7 +191,7 @@ what you don't need — two keys are required, everything else has a working def
 | **Agent commands** | the full CLI invocation for each agent — change model, flags, or binary; the Codex availability check (default `codex login status`, no tokens); Codex reviews default to medium reasoning |
 | **Timing** | poll interval, churn cap, per-stage timeouts, implement idle-progress cap, CLI turn budget, opt-in forge check wait, retry policy |
 | **State files** | lock, stop flag, log, handover report, heartbeat, churn tally, rescue manifest |
-| **Watcher** | on/auto/off, poll, Claude command, fix cap, hourly Claude cap, report, log, offset file, coder log paths, verbose Output channel, optional experimental Claude narration, narration debug |
+| **Watcher** | on/auto/off, poll, Claude command, fix cap, hourly Claude cap, report, log, offset file, coder log paths, verbose Output channel, optional experimental Claude narration |
 
 Nothing about your board's vocabulary is hardcoded. If your workflow spells things differently,
 override the names; no code change is needed. `npm test` enforces this — a setting the dispatcher
@@ -216,7 +212,6 @@ reads but the example never documents fails the build.
 | **Agent Loop: Recover unsafe stop** | Commit preserved sandbox work after an unsafe-child stop, if no descendant is still alive. |
 | **Agent Loop: Open the watcher report** | What the watcher last decided, and what to do next. |
 | **Agent Loop: Show watcher activity** | Open the Agent Loop Watcher output channel. |
-| **Agent Loop: Test watcher narration** | Send one test batch through the narration path. It says it is a test and shows the Output channel. |
 
 ---
 

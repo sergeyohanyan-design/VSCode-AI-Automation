@@ -327,11 +327,7 @@ measured call in that temp directory, with `--output-format json` (narration
 does not pass that flag), used 2 input tokens, 10,422 cache-creation tokens
 and 73,283 cache-read tokens. The same call with `--safe-mode` used 2, 392
 and 1,647, and a subscription login still worked, so narration passes
-`--safe-mode`. `AGENT_LOOP_WATCHER_NARRATE_DEBUG=1` prints the command, the
-working directory, the exit code, and the first 300 characters of stderr.
-**Agent Loop: Test watcher narration** sends one test batch through that
-path. The text says it is a test. The channel is shown, and the block or the
-failure is written. It works while narration is off.
+`--safe-mode`.
 
 ---
 

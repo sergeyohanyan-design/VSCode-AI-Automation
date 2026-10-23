@@ -1,15 +1,19 @@
 # Changelog
 
-## 1.3.0
+## 1.3.1
 
 - The watcher reports P19 when the implementation ceiling kills the same task twice in 24 hours. Only the phase line that says `killed-ceiling` counts, so the timeout line beside it is not a second kill. Idle kills stay on P17. The report says these kills do not count toward the round limit, and to split the task or raise `AGENT_LOOP_IMPLEMENT_TIMEOUT_S`. The watcher does not edit the task or the config. A second task still notifies. The same task does not notify again on the next tick.
 - The Output channel **Agent Loop Watcher** logs stage changes, status lines, verdicts, kills, playbook decisions, and a notable failure that matched no row. A repeated heartbeat tick is not logged. `AGENT_LOOP_WATCHER_VERBOSE` defaults to `on`. **Agent Loop: Show watcher activity** reveals the channel.
 - `AGENT_LOOP_WATCHER_NARRATE` (`off` by default, or `problems`, or `events`) explains the same facts in the **Agent Loop Watcher** Output channel. Experimental. It uses the `claude` CLI, not a Claude chat. `problems` sends a playbook match at once and shows the channel without taking focus. `events` also sends state changes, batched at `AGENT_LOOP_WATCHER_NARRATE_MIN_S` (default 300), and does not show the channel on its own. Calls share `AGENT_LOOP_WATCHER_MAX_CALLS_PER_H`. Each call is stateless. The command is the default headless command, including `--no-session-persistence` and `--safe-mode`, with tools disabled and permission prompts off. `--bare` is not used. The working directory is an empty temp directory. The reply is redacted and written as one block. A failure is logged and the tick continues.
-- **Agent Loop: Test watcher narration** sends one test batch through that path. The text says it is a test. The channel is shown without taking focus, and the block or the failure is written. It works while narration is off.
-- `AGENT_LOOP_WATCHER_NARRATE_DEBUG=1` logs the narration command, the working directory, the exit code, and the first 300 characters of stderr.
 - One measured narration call in that temp directory, with `--output-format json` (not passed by narration), used 2 input tokens, 10,422 cache-creation tokens and 73,283 cache-read tokens. The same call with `--safe-mode` used 2, 392 and 1,647. A subscription login still worked, so narration passes `--safe-mode`.
 - A repeated NOTIFY row is not appended to `~/.agent-loop-watcher.log` again. The same signature logs once. P19's signature includes the task and the count, so a higher count logs once more. One owner file (`~/.agent-loop-watcher-owner.json`, pid and heartbeat) lets one window act and narrate. A dead or stale owner is taken over. Other windows only show the Output channel.
 - `--selftest` writes its log, lock, stop flag, heartbeat, round tally, rescue file, unsafe marker and handover report into a fresh temp directory. A test run does not append to the live log.
+- When Claude's adjudication overrules a Codex failure, the persisted approval and the later land comment name that adjudication. A Codex pass is still stored as Codex. An older bare SHA, or an older record that names Codex, still loads, and a missing reviewer stays unrecorded.
+- A zero-commit branch that already has a remote-tracking ref is recognized on Linux, so it is not treated as safe to delete.
+
+## 1.3.0
+
+- Tagged, not published. The release job failed its selftest, so this version never reached a registry. The notes above are what 1.3.1 ships.
 
 ## 1.2.2
 

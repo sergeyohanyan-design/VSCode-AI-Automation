@@ -28,6 +28,7 @@ const STATE_ENV_KEYS = new Set([
   'AGENT_LOOP_WATCHER_REPORT', 'AGENT_LOOP_WATCHER_LOG', 'AGENT_LOOP_WATCHER_STATE',
   'AGENT_LOOP_WATCHER_CODER_LOGS', 'AGENT_LOOP_WATCHER_VERBOSE',
   'AGENT_LOOP_WATCHER_NARRATE', 'AGENT_LOOP_WATCHER_NARRATE_MIN_S',
+  'AGENT_LOOP_WATCHER_NARRATE_DEBUG',
   'AGENT_LOOP_IMPLEMENT_TIMEOUT_S',
   'AGENT_LOOP_REVIEW_TIMEOUT_S', 'AGENT_LOOP_VERIFY_TIMEOUT_S', 'AGENT_LOOP_VERIFY_SEED_DIRS',
 ]);
@@ -361,6 +362,9 @@ let narrationFlight = false;
 let narrationTestRunning = false;
 const narrationSurfaces = new Map();
 const narrationTrustRuns = new Set();
+const narrationNoSessionRuns = new Set();
+let watcherOwnerNoted = false;
+let watcherOwnsFile = false;
 
 function armWatcher() {
   watcherArmedAt = Date.now();
@@ -411,10 +415,52 @@ function ensureWatcher() {
   void watcherTick();
 }
 
+function watcherOwnerFile() {
+  return path.join(os.homedir(), '.agent-loop-watcher-owner.json');
+}
+
+function readWatcherOwner() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(watcherOwnerFile(), 'utf8'));
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch { return null; }
+}
+
+function releaseWatcherOwner() {
+  if (!watcherOwnsFile) return;
+  watcherOwnsFile = false;
+  try {
+    const current = readWatcherOwner();
+    if (current && current.pid === process.pid) fs.unlinkSync(watcherOwnerFile());
+  } catch { /* the next window takes over when the record is stale */ }
+}
+
+function claimThisWatcher(pollMs) {
+  const now = Date.now();
+  const current = readWatcherOwner();
+  const other = !!(current && current.pid && current.pid !== process.pid);
+  const claim = watcher.claimWatcher({
+    owner: current,
+    now,
+    pid: process.pid,
+    ownerAlive: other ? pidAlive(current.pid) : true,
+    staleMs: Math.max(3 * pollMs, 90_000),
+  });
+  if (!claim.act) return claim;
+  try {
+    fs.writeFileSync(watcherOwnerFile(), JSON.stringify({ pid: process.pid, at: now }));
+    watcherOwnsFile = true;
+  } catch { /* a failed write still lets this tick act; the race is one tick */ }
+  return claim;
+}
+
 function stopWatcher() {
-  if (!watcherTimer) return;
-  clearInterval(watcherTimer);
-  watcherTimer = null;
+  if (watcherTimer) {
+    clearInterval(watcherTimer);
+    watcherTimer = null;
+  }
+  releaseWatcherOwner();
 }
 
 function readLogChunk(file, offset) {
@@ -707,6 +753,16 @@ async function watcherTick() {
   try {
     const { env, paths, mode } = watcherSettings();
     if (mode === 'off') { stopWatcher(); return; }
+    const pollMs = watcher.pollSeconds(env.AGENT_LOOP_WATCHER_POLL_S) * 1000;
+    const claim = claimThisWatcher(pollMs);
+    if (!claim.act) {
+      if (!watcherOwnerNoted) {
+        watcherOwnerNoted = true;
+        watcherSay('watcher is running in another window');
+      }
+      return;
+    }
+    watcherOwnerNoted = false;
     const facts = await collectFacts(env, paths, mode);
     let decision = watcher.evaluate(facts, watcherMemory || watcher.emptyMemory());
     if (decision.needsClaude) {
@@ -760,7 +816,7 @@ function watcherSay(line) {
 }
 
 function emptySurface() {
-  return { presented: false, tab: null, label: '', viewColumn: undefined };
+  return { presented: false, tab: null, label: '', viewColumn: undefined, openAttempted: false };
 }
 
 function surfaceFor(sessionId) {
@@ -772,11 +828,17 @@ function surfaceFor(sessionId) {
   return surface;
 }
 
+function annotateTab(tab, group) {
+  if (!tab || tab.group || !group) return tab;
+  try { Object.defineProperty(tab, 'group', { value: group, configurable: true }); } catch { /* a sealed tab still matches on its other fields */ }
+  return tab;
+}
+
 function listAllTabs() {
   const groups = vscode.window && vscode.window.tabGroups && vscode.window.tabGroups.all || [];
   const tabs = [];
   for (const group of groups) {
-    for (const tab of group.tabs || []) tabs.push(tab);
+    for (const tab of group.tabs || []) tabs.push(annotateTab(tab, group));
   }
   return tabs;
 }
@@ -833,7 +895,7 @@ async function restoreEditorPlace(place, openedTab) {
   if (!place || !openedTab || !place.editor || !vscode.window || typeof vscode.window.showTextDocument !== 'function') return;
   const active = vscode.window.tabGroups && vscode.window.tabGroups.activeTabGroup
     && vscode.window.tabGroups.activeTabGroup.activeTab;
-  if (active !== openedTab) return;
+  if (!active || watcher.tabKey(annotateTab(active, groupOf(active))) !== watcher.tabKey(openedTab)) return;
   await vscode.window.showTextDocument(place.editor.document, {
     viewColumn: place.viewColumn,
     selection: place.selection,
@@ -858,20 +920,23 @@ function openNarrationEditor(sessionId, viewColumn) {
 }
 
 async function waitForNewClaudeTab(before, extra) {
+  let tabs = [];
   const deadline = Date.now() + 2000;
   while (Date.now() <= deadline) {
-    const pool = listAllTabs();
-    for (const tab of extra) {
-      if (!pool.includes(tab)) pool.push(tab);
-    }
-    const found = watcher.findNewClaudeTab(before, pool);
-    if (found) return found;
+    tabs = watcher.combineTabSnapshots(listAllTabs(), extra);
+    const found = watcher.findNewClaudeTab(before, tabs);
+    if (found) return { tab: found, tabs };
     await delay(100);
   }
-  return null;
+  return { tab: null, tabs };
 }
 
-async function presentNarration(sessionId, surface, say) {
+function logNarrationTabs(label, tabs) {
+  const rows = (tabs || []).map(tab => watcher.tabDebugLine(tab));
+  watcherSay(`narration debug: tabs ${label}: ${rows.join(' | ') || '(none)'}`);
+}
+
+async function presentNarration(sessionId, surface, say, debug = false) {
   const described = narrationTabState(surface);
   const action = watcher.narrationSurfaceAction(described);
   if (action === 'leave') {
@@ -882,7 +947,11 @@ async function presentNarration(sessionId, surface, say) {
     say('refresh skipped: tab is focused');
     return;
   }
-  const before = listAllTabs();
+  if (!watcher.narrationMayOpen(action, surface && surface.openAttempted)) {
+    say('not opening again: the first open was not confirmed');
+    return;
+  }
+  if (action === 'open') surface.openAttempted = true;
   const opened = [];
   let events = null;
   try {
@@ -905,13 +974,20 @@ async function presentNarration(sessionId, surface, say) {
         say(`refresh skipped: ${e.message}`);
         return;
       }
+      const closedKey = watcher.tabKey(described.found.tab);
       const gone = Date.now() + 500;
-      while (Date.now() < gone && listAllTabs().includes(described.found.tab)) await delay(50);
+      while (Date.now() < gone && listAllTabs().some(tab => tab === described.found.tab || watcher.tabKey(tab) === closedKey)) {
+        await delay(50);
+      }
     } else if (surface.viewColumn != null) {
       column = surface.viewColumn;
     }
+    const before = listAllTabs();
+    if (debug) logNarrationTabs('before', before);
     await openNarrationEditor(sessionId, column);
-    const tab = await waitForNewClaudeTab(before, opened);
+    const waited = await waitForNewClaudeTab(before, opened.map(item => annotateTab(item, groupOf(item))));
+    if (debug) logNarrationTabs('after', waited.tabs);
+    const tab = waited.tab;
     if (!tab) {
       say(action === 'refresh' ? 'refresh skipped: no editor tab appeared' : 'opened: no editor tab appeared');
       return;
@@ -934,18 +1010,36 @@ function claudeProjectsDir() {
   return path.join(os.homedir(), '.claude', 'projects');
 }
 
-async function deliverNarrationTurn({ sessionId, resume, input, cwd, paths, surface, say, trustNoted, markTrust }) {
+async function deliverNarrationTurn({
+  sessionId, resume, input, cwd, paths, surface, say, trustNoted, markTrust,
+  debug = false, noSessionNoted, markNoSession,
+}) {
   const command = watcher.narrationCommand({ sessionId, resume }).map(watcher.quoteCmdArg).join(' ');
+  const childEnv = watcher.narrationChildEnv();
+  const before = resume ? watcher.findSessionStat(claudeProjectsDir(), sessionId) : null;
+  if (debug) {
+    const names = watcher.narrationDebugEnvNames(childEnv);
+    watcherSay(`narration debug: command: ${command}`);
+    watcherSay(`narration debug: cwd: ${cwd}`);
+    watcherSay(`narration debug: env: ${names.join(', ') || '(none)'}`);
+  }
   let result;
   try {
     result = await watcher.spawnCaptured(command, {
-      input, cwd, timeoutMs: watcher.CLAUDE_TIMEOUT_MS,
+      input, cwd, timeoutMs: watcher.CLAUDE_TIMEOUT_MS, env: childEnv,
     });
   } catch (e) {
     const why = e && e.message ? e.message : 'narration failed';
     say(`failed: ${why}`);
     try { watcher.appendLog(paths.watcherLog, `narration failed: ${why}`); } catch { /* log is best-effort */ }
     return { ok: false };
+  }
+  const stat = watcher.findSessionStat(claudeProjectsDir(), sessionId);
+  if (debug) {
+    watcherSay(`narration debug: exit ${result.code}`);
+    watcherSay(`narration debug: stdout: ${String(result.text || '').slice(0, 300)}`);
+    watcherSay(`narration debug: stderr: ${String(result.err || '').slice(0, 300)}`);
+    watcherSay(`narration debug: session file: ${stat.exists ? 'exists' : 'missing'}`);
   }
   if (!result.ok) {
     const blob = `${result.why || ''}\n${result.err || ''}\n${result.text || ''}`;
@@ -958,9 +1052,17 @@ async function deliverNarrationTurn({ sessionId, resume, input, cwd, paths, surf
     try { watcher.appendLog(paths.watcherLog, `narration failed: ${why}`); } catch { /* log is best-effort */ }
     return { ok: false };
   }
-  const stat = watcher.findSessionStat(claudeProjectsDir(), sessionId);
+  if (!watcher.narrationSaved({ code: result.code, before, after: stat, resume })) {
+    if (!noSessionNoted || !noSessionNoted()) {
+      const line = watcher.narrationNoSessionLine(cwd);
+      watcherSay(line);
+      try { watcher.appendLog(paths.watcherLog, line); } catch { /* log is best-effort */ }
+      if (markNoSession) markNoSession();
+    }
+    return { ok: false, stat };
+  }
   say('appended');
-  try { await presentNarration(sessionId, surface, say); }
+  try { await presentNarration(sessionId, surface, say, debug); }
   catch (e) { say(`open failed: ${e.message}`); }
   return { ok: true, stat };
 }
@@ -1023,6 +1125,7 @@ function scheduleNarration(env, paths, facts, decision, events) {
     narration.sessionId = null;
     narration.stamp = null;
     narration.trustNoted = false;
+    narration.noSessionNoted = false;
   }
   const projects = path.join(os.homedir(), '.claude', 'projects');
   if (narration.sessionId && watcher.sessionChangedByOther(
@@ -1052,6 +1155,18 @@ function scheduleNarration(env, paths, facts, decision, events) {
       paths,
       surface: surfaceFor(sessionId),
       say,
+      debug: watcher.narrationDebugEnabled(env.AGENT_LOOP_WATCHER_NARRATE_DEBUG),
+      noSessionNoted: () => narrationNoSessionRuns.has(runId || '')
+        || !!(watcherMemory && watcherMemory.narration && watcherMemory.narration.noSessionNoted),
+      markNoSession: () => {
+        narrationNoSessionRuns.add(runId || '');
+        if (!watcherMemory) return;
+        const state = watcher.copyNarration(watcherMemory.narration);
+        if (state.noSessionNoted) return;
+        state.noSessionNoted = true;
+        watcherMemory.narration = state;
+        try { watcher.saveMemory(paths.watcherState, watcherMemory); } catch { /* state file is best-effort */ }
+      },
       trustNoted: () => narrationTrustRuns.has(runId || '')
         || !!(watcherMemory && watcherMemory.narration && watcherMemory.narration.trustNoted),
       markTrust: () => {
@@ -1069,6 +1184,7 @@ function scheduleNarration(env, paths, facts, decision, events) {
       if (!watcherMemory) return;
       const state = watcher.copyNarration(watcherMemory.narration);
       if (narrationTrustRuns.has(runId || '')) state.trustNoted = true;
+      if (narrationNoSessionRuns.has(runId || '')) state.noSessionNoted = true;
       watcherMemory.claudeCalls = [...(watcherMemory.claudeCalls || []), Date.now()];
       if (result.ok) {
         state.sessionId = sessionId;
@@ -1108,7 +1224,8 @@ async function testWatcherNarration() {
   narrationTestRunning = true;
   const say = (line) => watcherSay(`narration test: ${line}`);
   const surface = emptySurface();
-  const local = { trustNoted: false, sessionId: null, stamp: null };
+  const local = { trustNoted: false, noSessionNoted: false, sessionId: null, stamp: null };
+  const debug = watcher.narrationDebugEnabled(loadStateEnv().AGENT_LOOP_WATCHER_NARRATE_DEBUG);
   try {
     if (!watcherChannel) watcherChannel = vscode.window.createOutputChannel('Agent Loop Watcher');
     watcherChannel.show(true);
@@ -1128,6 +1245,9 @@ async function testWatcherNarration() {
       paths,
       surface,
       say,
+      debug,
+      noSessionNoted: () => local.noSessionNoted,
+      markNoSession: () => { local.noSessionNoted = true; },
       trustNoted: () => local.trustNoted,
       markTrust: () => {
         if (local.trustNoted) return;
@@ -1156,6 +1276,7 @@ async function testWatcherNarration() {
       surface.tab = null;
       surface.label = '';
       surface.viewColumn = undefined;
+      surface.openAttempted = false;
       say('session created');
       const again = await runBatch(2, false);
       if (!again.ok) say('stopped');
@@ -1238,7 +1359,9 @@ function activate(context) {
   }));
 }
 
-function deactivate() {}
+function deactivate() {
+  releaseWatcherOwner();
+}
 
 module.exports = {
   activate,

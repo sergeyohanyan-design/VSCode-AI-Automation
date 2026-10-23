@@ -236,19 +236,35 @@ one file, not a feature spanning three layers. Then explain to me, briefly:
   The Output channel Agent Loop Watcher logs stage changes, status lines,
   verdicts, kills and decisions. `AGENT_LOOP_WATCHER_VERBOSE=off` silences it.
   The command Agent Loop: Show watcher activity opens it.
+  A NOTIFY row is logged once, and again only when its signature changes. A
+  repeated implementation-ceiling kill includes the count in that signature.
+  Only one window on the machine runs the watcher. Other windows show the
+  Output channel and do not act or narrate.
   `AGENT_LOOP_WATCHER_NARRATE` is `off` unless set to `problems` or `events`.
   It explains those facts in a Claude Code session for this workspace. A
   playbook match is sent at once. Other events are batched, at least
   `AGENT_LOOP_WATCHER_NARRATE_MIN_S` seconds apart (default 300), and they
-  share the hourly Claude cap. A narration failure is logged. The playbook
-  still runs. The session opens in an editor tab beside the current one. A
-  later turn replaces that tab when the human is not reading it. The Claude
-  sidebar does not load turns the watcher appends, so narration does not use
-  the sidebar. If Claude has not trusted the folder, the Output channel and
-  the watcher log say once per dispatcher run to open the folder in Claude
-  Code and accept the trust prompt. Nothing accepts that prompt automatically.
-  The command Agent Loop: Test watcher narration sends two test batches about
-  20 seconds apart on its own session, and it works while narration is off.
+  share the hourly Claude cap. A narration turn succeeds only when Claude
+  exits 0 and the session file is on disk, larger than before on a resume.
+  If the file was not saved, say once per run that Claude exited 0 but saved
+  no session, and do not open a tab. A narration failure is logged. The
+  playbook still runs. Open the session once, in an editor tab beside the
+  current one. If that open cannot be confirmed, do not open it again. A
+  later turn replaces a confirmed tab when the human is not reading it. The
+  Claude sidebar does not load turns the watcher appends, so narration does
+  not use the sidebar. One measured turn, a one-line reply with
+  `--output-format json`, reported 2 input tokens, 12,695 cache-creation
+  tokens and 73,283 cache-read tokens, and wrote a session file of about
+  590 KB. `claude --help` describes `--safe-mode` as disabling CLAUDE.md,
+  hooks and the other customizations while auth still works. Do not pass it
+  unless the human asks. `AGENT_LOOP_WATCHER_NARRATE_DEBUG=1` logs the
+  narration command, cwd, inherited Claude-related variable names, and
+  whether the session file exists. If Claude has not trusted the folder, the
+  Output channel and the watcher log say once per dispatcher run to open the
+  folder in Claude Code and accept the trust prompt. Nothing accepts that
+  prompt automatically. The command Agent Loop: Test watcher narration sends
+  two test batches about 20 seconds apart on its own session, and it works
+  while narration is off.
 - Deploy is never automated. The loop stops at `committed`.
 
 Finally, give me a short summary of everything that was configured, and anything

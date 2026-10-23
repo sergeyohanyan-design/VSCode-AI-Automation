@@ -73,15 +73,32 @@ Beyond the routing, the parts that matter in practice:
   While the loop runs, the Output channel **Agent Loop Watcher** logs stage
   changes, status lines, verdicts, kills and playbook decisions. It does not
   log a line on every poll. Set `AGENT_LOOP_WATCHER_VERBOSE=off` to keep it
-  quiet. `AGENT_LOOP_WATCHER_NARRATE` can also explain those events in a Claude
-  Code session for this workspace (`off` by default). The session opens in an
-  editor tab beside the current one. A later turn replaces that tab when you
+  quiet. A NOTIFY row is written once. It is written again only when its
+  signature changes, and a ceiling repeat's signature includes the count.
+  Only one window on the machine runs the watcher. Another window says so
+  once in the Output channel and does not act or narrate.
+  `AGENT_LOOP_WATCHER_NARRATE` can also explain those events in a Claude
+  Code session for this workspace (`off` by default). A turn counts as
+  success only when Claude exits 0 and the session file is on disk: present
+  after the first turn, and larger after a resume. If it is missing, the
+  Output channel and the watcher log say once per run that Claude exited 0
+  but saved no session, and no tab is opened. The session opens once, in an
+  editor tab beside the current one. If that open cannot be confirmed, a
+  later turn does not open another tab. A confirmed tab is replaced when you
   are not reading it, so the new text loads. A tab you are reading stays put
   until a later turn. Closing it leaves it closed. The Claude sidebar does
   not load turns the watcher appends, and a session it is already showing is
   not opened again as a new tab, so narration stays in the editor. Every open
   passes a programmatic option, so the chat input does not take the cursor
-  and your Claude location setting stays as it is. If Claude does not trust
+  and your Claude location setting stays as it is. One measured turn (a
+  one-line reply, `--output-format json`) reported 2 input tokens, 12,695
+  cache-creation tokens and 73,283 cache-read tokens, and wrote a session
+  file of about 590 KB. That cache is the workspace's Claude settings, hooks
+  and project instructions. `claude --help` describes `--safe-mode` as
+  starting with those customizations disabled while auth still works.
+  Narration does not pass it. `AGENT_LOOP_WATCHER_NARRATE_DEBUG=1` logs the
+  narration command, the working directory, inherited Claude-related variable
+  names, and whether the session file exists. If Claude does not trust
   this folder, the Output channel and the watcher log say once per dispatcher
   run to open the folder in Claude Code and accept the trust prompt. The
   watcher does not accept it for you. **Agent Loop: Test watcher narration**
@@ -185,7 +202,7 @@ what you don't need — two keys are required, everything else has a working def
 | **Agent commands** | the full CLI invocation for each agent — change model, flags, or binary; the Codex availability check (default `codex login status`, no tokens); Codex reviews default to medium reasoning |
 | **Timing** | poll interval, churn cap, per-stage timeouts, implement idle-progress cap, CLI turn budget, opt-in forge check wait, retry policy |
 | **State files** | lock, stop flag, log, handover report, heartbeat, churn tally, rescue manifest |
-| **Watcher** | on/auto/off, poll, Claude command, fix cap, hourly Claude cap, report, log, offset file, coder log paths, verbose Output channel, optional Claude narration |
+| **Watcher** | on/auto/off, poll, Claude command, fix cap, hourly Claude cap, report, log, offset file, coder log paths, verbose Output channel, optional Claude narration, narration debug |
 
 Nothing about your board's vocabulary is hardcoded. If your workflow spells things differently,
 override the names; no code change is needed. `npm test` enforces this — a setting the dispatcher

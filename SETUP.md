@@ -306,19 +306,36 @@ same task in 24 hours are reported. Those kills do not use a round, so raise
 **Agent Loop Watcher** shows stage changes, status lines, verdicts, kills and
 decisions, not a line on every poll (`AGENT_LOOP_WATCHER_VERBOSE=off` silences
 it). **Agent Loop: Show watcher activity** opens that channel.
-`AGENT_LOOP_WATCHER_NARRATE=problems` or `events` explains the same facts in a
-Claude Code session for this folder. The default is `off`. A match is sent at
-once. Other events wait `AGENT_LOOP_WATCHER_NARRATE_MIN_S` seconds (default
-300) and share the hourly Claude cap. A failed narration is logged and the
-playbook keeps going. The session opens in an editor tab beside the current
-one, and a later turn replaces that tab when it is not the tab you are
-reading. The Claude sidebar does not load turns appended from the watcher, so
-narration does not use it. If Claude has not trusted this folder, the Output
-channel and `~/.agent-loop-watcher.log` say once per run to open the folder in
-Claude Code and accept the trust prompt. The watcher never accepts trust
-itself. **Agent Loop: Test watcher narration** sends two plain test batches
-about 20 seconds apart. It uses its own session and works while narration is
-off.
+A NOTIFY row is written to `~/.agent-loop-watcher.log` once. It is written
+again only when its signature changes. A ceiling repeat includes the count in
+that signature, so a higher count is one new line. Only one window runs the
+watcher. Any other window writes one Output-channel line and does not act or
+narrate. `AGENT_LOOP_WATCHER_NARRATE=problems` or `events` explains the same
+facts in a Claude Code session for this folder. The default is `off`. A match
+is sent at once. Other events wait `AGENT_LOOP_WATCHER_NARRATE_MIN_S` seconds
+(default 300) and share the hourly Claude cap. A turn is a success only when
+Claude exits 0 and the session file exists, and a resume must make that file
+larger. If the file was not saved, the Output channel and the watcher log say
+once per run that Claude exited 0 but saved no session, and no tab is opened.
+A failed narration is logged and the playbook keeps going. The session is
+opened once, in an editor tab beside the current one. If that open cannot be
+confirmed, it is not opened again. A confirmed tab is replaced when it is not
+the tab you are reading. The Claude sidebar does not load turns appended from
+the watcher, so narration does not use it. One measured turn, a one-line
+reply with `--output-format json`, reported 2 input tokens, 12,695
+cache-creation tokens and 73,283 cache-read tokens, and wrote a session file
+of about 590 KB, because the workspace's Claude settings, hooks and project
+instructions load on every turn. `claude --help` describes `--safe-mode` as
+disabling those customizations while auth still works. Narration does not
+pass that flag. `AGENT_LOOP_WATCHER_NARRATE_DEBUG=1` prints the narration
+command, the working directory, the names of inherited Claude-related
+variables, and whether the session file was saved. If Claude has not trusted
+this folder, the Output channel and `~/.agent-loop-watcher.log` say once per
+run to open the folder in Claude Code and accept the trust prompt. The
+watcher never accepts trust itself. **Agent Loop: Test watcher narration**
+sends two plain test batches about 20 seconds apart. It uses its own session
+and works while narration is off. Set the debug key before that click when
+you need the child environment.
 
 ---
 

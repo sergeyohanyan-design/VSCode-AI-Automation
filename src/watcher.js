@@ -336,7 +336,7 @@ function claudeOnPath() {
 function emptyNarration() {
   return {
     sessionId: null, stamp: null, lastSentAt: null, pending: [],
-    budgetNotedAt: null, runId: null, trustNoted: false,
+    budgetNotedAt: null, runId: null, trustNoted: false, noSessionNoted: false,
   };
 }
 
@@ -353,6 +353,7 @@ function copyNarration(value) {
     budgetNotedAt: Number.isFinite(n.budgetNotedAt) ? n.budgetNotedAt : null,
     runId: typeof n.runId === 'string' && n.runId ? n.runId : null,
     trustNoted: n.trustNoted === true,
+    noSessionNoted: n.noSessionNoted === true,
   };
 }
 
@@ -732,6 +733,10 @@ function matchP19(lines, now) {
   return repeats;
 }
 
+function p19Signature(taskId, count) {
+  return `P19:${taskId}:${count}`;
+}
+
 function fixedText(row, extra = {}) {
   const steps = {
     P1: 'The watcher kills the stuck process tree, clears the lock and the stop flag, and starts the loop again. A coding task that already has commits is moved to review on the next start.',
@@ -843,7 +848,7 @@ function matchPlaybook(facts, now) {
     return {
       row: 'P19', response: 'NOTIFY', action: 'wait',
       line: pick.line, count: pick.count, taskId: pick.taskId,
-      signature: `P19:${pick.taskId}`, repeats: p19,
+      signature: p19Signature(pick.taskId, pick.count), repeats: p19,
     };
   }
   const limit = Number.isFinite(facts.stageLimitMs)
@@ -1036,12 +1041,12 @@ function evaluate(facts = {}, memory = {}, claude) {
 
   let hit = matchPlaybook(seen, now);
   if (hit && hit.row === 'P19' && Array.isArray(hit.repeats)) {
-    const open = hit.repeats.find(item => !mem.notified[`P19:${item.taskId}`]);
+    const open = hit.repeats.find(item => !mem.notified[p19Signature(item.taskId, item.count)]);
     const pick = open || hit.repeats[0];
     hit = {
       row: 'P19', response: 'NOTIFY', action: 'wait',
       line: pick.line, count: pick.count, taskId: pick.taskId,
-      signature: `P19:${pick.taskId}`,
+      signature: p19Signature(pick.taskId, pick.count),
     };
   }
   if (!hit) {
@@ -1183,7 +1188,10 @@ function finish(facts, mem, now, hit, claude) {
   if (action === 'probe_coders') effects.probe = true;
   if (hit.waitMin) effects.waitMin = Math.min(MAX_WAIT_MIN, hit.waitMin);
   if (response === 'WAIT' && !effects.waitMin) effects.waitMin = 10;
-  if (mem.notified[signature] && response === 'NOTIFY') effects.notify = false;
+  // A repeated NOTIFY for the same signature has already been logged. A new
+  // signature (another task, or a higher P19 count) still logs once.
+  const repeatNotify = !!(mem.notified[signature] && response === 'NOTIFY');
+  if (repeatNotify) effects.notify = false;
 
   if (['kill_and_recover', 'kill_lingering', 'clear_stale_lock', 'recover', 'reset_stub', 'bench_coder'].includes(action)) {
     mem.fixes[signature] = recentTimes(mem.fixes[signature], now, FIX_WINDOW_MS);
@@ -1236,13 +1244,13 @@ function finish(facts, mem, now, hit, claude) {
     taskId: view.taskId || null,
     coderName: view.coderName || null,
     matched,
-    report,
-    logLine: redact(logLine),
+    report: repeatNotify ? null : report,
+    logLine: repeatNotify ? null : redact(logLine),
     memory: mem,
     summary: `${TITLES[hit.row] || hit.row}: ${humanFix}`.slice(0, 240),
     humanFix,
     refused,
-    quiet: false,
+    quiet: repeatNotify,
     signature,
   };
 }
@@ -1299,7 +1307,7 @@ async function waitUntilDead(pid, opts = {}) {
   return true;
 }
 
-function spawnCaptured(argv, { input = null, cwd, timeoutMs = CLAUDE_TIMEOUT_MS } = {}) {
+function spawnCaptured(argv, { input = null, cwd, timeoutMs = CLAUDE_TIMEOUT_MS, env } = {}) {
   const dir = cwd || fs.mkdtempSync(path.join(os.tmpdir(), 'agent-loop-watcher-'));
   const cmd = Array.isArray(argv) ? argv.map(quoteCmdArg).join(' ') : String(argv);
   return new Promise(resolve => {
@@ -1308,6 +1316,7 @@ function spawnCaptured(argv, { input = null, cwd, timeoutMs = CLAUDE_TIMEOUT_MS 
     let settled = false;
     const child = cp.spawn(cmd, {
       cwd: dir, shell: true, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      ...(env ? { env } : {}),
     });
     const finish = result => {
       if (settled) return;
@@ -1665,19 +1674,71 @@ function isClaudePanelTab(tab) {
   return claudePanelViewType(tab).endsWith(CLAUDE_PANEL_VIEW);
 }
 
-// `before` and `after` are tab objects. Identity is the match. One new Claude
-// panel tab is that tab. None, a different view type, or two new Claude tabs
-// is no result — two new tabs are ambiguous.
+// VS Code can hand back a new Tab object for the same tab. Identity is not a
+// match. The key is the input kind, view type, label and group column.
+function tabInputKind(tab) {
+  const input = tab && tab.input;
+  if (!input || typeof input !== 'object') return '';
+  const name = input.constructor && input.constructor.name;
+  return typeof name === 'string' ? name : '';
+}
+
+function tabColumn(tab) {
+  if (!tab || typeof tab !== 'object' || !tab.group || tab.group.viewColumn == null) return '';
+  return tab.group.viewColumn;
+}
+
+function tabKey(tab) {
+  if (!tab || typeof tab !== 'object') return '';
+  return [tabInputKind(tab), claudePanelViewType(tab), String(tab.label || ''), String(tabColumn(tab))].join('\0');
+}
+
+function tabDebugLine(tab) {
+  const label = tab && tab.label != null ? String(tab.label) : '';
+  return `input=${tabInputKind(tab)} viewType=${claudePanelViewType(tab)} label=${label} column=${tabColumn(tab)}`;
+}
+
+// One new Claude panel tab is that tab. The same tab as a new object, a
+// different view type, or two new Claude tabs is no result.
 function findNewClaudeTab(before, after) {
-  const prior = new Set(before || []);
-  const seen = new Set();
+  const prior = new Map();
+  for (const tab of before || []) {
+    if (!tab) continue;
+    const key = tabKey(tab);
+    prior.set(key, (prior.get(key) || 0) + 1);
+  }
+  const used = new Map();
   const added = [];
   for (const tab of after || []) {
-    if (!tab || prior.has(tab) || seen.has(tab) || !isClaudePanelTab(tab)) continue;
-    seen.add(tab);
+    if (!tab || !isClaudePanelTab(tab)) continue;
+    const key = tabKey(tab);
+    const seen = (used.get(key) || 0) + 1;
+    used.set(key, seen);
+    if (seen <= (prior.get(key) || 0)) continue;
     added.push(tab);
   }
   return added.length === 1 ? added[0] : null;
+}
+
+// An event object often has no group column yet. A blank column still means
+// the same tab. Two tabs in different columns stay two tabs.
+function tabsLooselySame(a, b) {
+  if (tabInputKind(a) !== tabInputKind(b)) return false;
+  if (claudePanelViewType(a) !== claudePanelViewType(b)) return false;
+  if (String((a && a.label) || '') !== String((b && b.label) || '')) return false;
+  const left = tabColumn(a);
+  const right = tabColumn(b);
+  return left === '' || right === '' || String(left) === String(right);
+}
+
+function combineTabSnapshots(primary, extra) {
+  const out = [];
+  for (const tab of primary || []) if (tab) out.push(tab);
+  for (const tab of extra || []) {
+    if (!tab || out.some(item => tabsLooselySame(item, tab))) continue;
+    out.push(tab);
+  }
+  return out;
 }
 
 // open: show the session. refresh: close and open the editor tab again.
@@ -1691,6 +1752,60 @@ function narrationSurfaceAction({ presented = false, tracked = false, open = fal
 
 function narrationTrustFailure(text) {
   return /has not been trusted/i.test(String(text || ''));
+}
+
+// Exit 0 is not enough. The first turn must leave a non-empty session file.
+// A resume must make that file larger.
+function narrationSaved({ code, before, after, resume = false } = {}) {
+  if (code !== 0) return false;
+  if (!after || after.exists !== true || !(after.size > 0)) return false;
+  if (!resume) return true;
+  const prior = before && Number.isFinite(before.size) ? before.size : 0;
+  return after.size > prior;
+}
+
+function narrationNoSessionLine(cwd) {
+  return `narration failed: claude exited 0 but saved no session (${cwd})`;
+}
+
+function narrationDebugEnabled(value) {
+  return /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
+}
+
+function narrationDebugEnvNames(env) {
+  return Object.keys(env || {}).filter(key => {
+    const name = String(key);
+    return /^(CLAUDE|ANTHROPIC|CODEX)/.test(name) || name.includes('SESSION');
+  }).sort();
+}
+
+// Copy of the parent environment for the narration child only.
+// No variable is removed. The Claude Code extension assigns
+// CLAUDE_AGENT_SDK_VERSION on the extension-host process. The CLI only
+// appends that name to its user-agent. A narration-shaped spawn with that
+// variable set still wrote the session file, so it is not the cause and it
+// is not removed. Auth and PATH stay.
+function narrationChildEnv(base = process.env) {
+  return { ...base };
+}
+
+// Open the session once. A later turn may still refresh a tab that was found.
+function narrationMayOpen(action, openAttempted) {
+  return action !== 'open' || openAttempted !== true;
+}
+
+// One watcher per machine. A missing record, a dead pid, or a stale heartbeat
+// is a takeover. The same pid refreshes its heartbeat. A live fresh owner is
+// left alone.
+function claimWatcher({ owner = null, now = 0, pid, ownerAlive = false, staleMs = 90000 } = {}) {
+  const record = owner && Number.isInteger(owner.pid) && owner.pid > 0 && Number.isFinite(owner.at)
+    ? { pid: owner.pid, at: owner.at }
+    : null;
+  const next = { pid, at: now };
+  if (!record) return { act: true, owner: next, tookOver: true };
+  if (record.pid === pid) return { act: true, owner: next, tookOver: false };
+  if (now - record.at >= staleMs || ownerAlive === false) return { act: true, owner: next, tookOver: true };
+  return { act: false, owner: record, tookOver: false };
 }
 
 module.exports = {
@@ -1709,5 +1824,7 @@ module.exports = {
   narrationSessionId, sessionChangedByOther, findSessionStat, notableEvents,
   unmatchedNotable, planNarration, narrationPrompt, copyNarration, emptyNarration,
   isClaudePanelTab, findNewClaudeTab, narrationSurfaceAction, narrationTrustFailure,
-  NARRATION_TRUST_LINE,
+  NARRATION_TRUST_LINE, narrationSaved, narrationNoSessionLine, narrationDebugEnabled,
+  narrationDebugEnvNames, narrationChildEnv, narrationMayOpen, tabKey, tabDebugLine,
+  combineTabSnapshots, claimWatcher,
 };

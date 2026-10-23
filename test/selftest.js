@@ -720,6 +720,12 @@ async function watcherChecks() {
   assert.equal(p5.response, 'NOTIFY');
   assert.equal(p5.effects.start, false);
   assert.ok(p5.report.includes('git rev-list --count'));
+  assert.ok(p5.logLine);
+  const p5again = decide({ lines: [stub, elig, elig] }, p5.memory);
+  assert.equal(p5again.row, 'P5');
+  assert.equal(p5again.effects.notify, false);
+  assert.equal(p5again.logLine, null);
+  assert.equal(p5again.quiet, true);
   const p5auto = decide({
     lines: [stub, elig, elig],
     phase2: true,
@@ -960,6 +966,7 @@ async function watcherChecks() {
   assert.equal(p10.effects.kill, false);
   const p10quiet = decide({ ...parked, now: NOW + 60_000 }, p10.memory);
   assert.equal(p10quiet.quiet, true);
+  assert.equal(p10quiet.logLine, null);
   assert.notEqual(decide({ ...parked, heartbeatAgeMs: 5 * 60 * 1000 }).row, 'P10');
 
   const stopCoder = stamp(NOW, 'STOP: no coder available');
@@ -1161,6 +1168,8 @@ async function watcherChecks() {
   assert.equal(p19.effects.kill, false);
   assert.equal(p19.effects.resetStub, false);
   assert.equal(p19.effects.bench, false);
+  assert.equal(p19.signature, 'P19:task1:2');
+  assert.ok(p19.logLine);
   assert.ok(p19.report.includes('2 times'));
   assert.ok(p19.report.includes('do not count toward the round limit'));
   assert.ok(p19.report.includes('AGENT_LOOP_IMPLEMENT_TIMEOUT_S'));
@@ -1180,11 +1189,17 @@ async function watcherChecks() {
   const p19Again = decide({ lines: [] }, p19.memory);
   assert.equal(p19Again.row, 'P19');
   assert.equal(p19Again.effects.notify, false);
+  assert.equal(p19Again.logLine, null);
+  assert.equal(p19Again.quiet, true);
+  const p19Higher = decide({ lines: ceilingPair(NOW, 'task1') }, p19.memory);
+  assert.equal(p19Higher.signature, 'P19:task1:3');
+  assert.equal(p19Higher.effects.notify, true);
+  assert.ok(p19Higher.logLine);
   const p19Other = decide({
     lines: [...ceilingPair(NOW - 500, 'task2'), ...ceilingPair(NOW, 'task2')],
   }, p19.memory);
   assert.equal(p19Other.row, 'P19');
-  assert.equal(p19Other.signature, 'P19:task2');
+  assert.equal(p19Other.signature, 'P19:task2:2');
   assert.equal(p19Other.effects.notify, true);
   assert.equal(decide({
     lines: [...ceilingPair(NOW - 1000, 'task1', 'claude'), ...ceilingPair(NOW, 'task1', 'claude')],
@@ -1477,6 +1492,17 @@ async function watcherChecks() {
   assert.equal(watcher.findNewClaudeTab([kept], [kept, added]), added);
   assert.equal(watcher.findNewClaudeTab([kept], [kept, otherView]), null);
   assert.equal(watcher.findNewClaudeTab([kept], [kept, added, second]), null);
+  const sameNew = { viewType: 'mainThreadWebview-claudeVSCodePanel', label: 'kept' };
+  assert.equal(watcher.findNewClaudeTab([kept], [sameNew]), null);
+  const twin = { viewType: 'claudeVSCodePanel', label: 'twin', group: { viewColumn: 1 } };
+  const twinAgain = { viewType: 'claudeVSCodePanel', label: 'twin', group: { viewColumn: 1 } };
+  assert.equal(watcher.findNewClaudeTab([], [twin, twinAgain]), null);
+  assert.equal(watcher.combineTabSnapshots([twin], [twinAgain]).length, 1);
+  assert.equal(watcher.combineTabSnapshots([], [twin, twinAgain]).length, 1);
+  assert.equal(watcher.combineTabSnapshots([twin], [{ viewType: 'claudeVSCodePanel', label: 'twin' }]).length, 1);
+  assert.equal(watcher.combineTabSnapshots([twin], [{
+    viewType: 'claudeVSCodePanel', label: 'twin', group: { viewColumn: 2 },
+  }]).length, 2);
   assert.equal(watcher.isClaudePanelTab(otherView), false);
   assert.equal(watcher.narrationSurfaceAction({}), 'open');
   assert.equal(watcher.narrationSurfaceAction({ presented: true, tracked: false }), 'open');
@@ -1486,9 +1512,70 @@ async function watcherChecks() {
   assert.equal(watcher.narrationTrustFailure('this workspace has not been trusted'), true);
   assert.equal(watcher.narrationTrustFailure('exit 1'), false);
   assert.ok(watcher.NARRATION_TRUST_LINE.includes('accept the trust prompt'));
-  assert.equal(watcher.copyNarration({ trustNoted: true }).trustNoted, true);
+  assert.equal(watcher.copyNarration({ trustNoted: true, noSessionNoted: true }).trustNoted, true);
+  assert.equal(watcher.copyNarration({ noSessionNoted: true }).noSessionNoted, true);
   assert.equal(watcher.emptyNarration().trustNoted, false);
-  assert.equal(watcher.forgetRun({ narration: { trustNoted: true } }).narration.trustNoted, false);
+  assert.equal(watcher.emptyNarration().noSessionNoted, false);
+  const forgottenNarration = watcher.forgetRun({ narration: { trustNoted: true, noSessionNoted: true } });
+  assert.equal(forgottenNarration.narration.trustNoted, false);
+  assert.equal(forgottenNarration.narration.noSessionNoted, false);
+  assert.equal(watcher.narrationSaved({ code: 0, after: { exists: false }, resume: false }), false);
+  assert.equal(watcher.narrationSaved({
+    code: 0, before: { exists: true, size: 10 }, after: { exists: true, size: 10 }, resume: true,
+  }), false);
+  assert.equal(watcher.narrationSaved({ code: 0, after: { exists: true, size: 4 }, resume: false }), true);
+  assert.equal(watcher.narrationSaved({
+    code: 0, before: { size: 4 }, after: { exists: true, size: 8 }, resume: true,
+  }), true);
+  assert.equal(
+    watcher.narrationNoSessionLine('<workspace>'),
+    'narration failed: claude exited 0 but saved no session (<workspace>)',
+  );
+  assert.equal(watcher.narrationDebugEnabled('1'), true);
+  assert.equal(watcher.narrationDebugEnabled('off'), false);
+  assert.deepEqual(watcher.narrationDebugEnvNames({
+    PATH: 'bin',
+    CLAUDE_AGENT_SDK_VERSION: '0',
+    ANTHROPIC_BASE_URL: 'https://example.invalid',
+    CODEX_HOME: 'dir',
+    MY_SESSION: 'id',
+    HOME: 'dir',
+  }), ['ANTHROPIC_BASE_URL', 'CLAUDE_AGENT_SDK_VERSION', 'CODEX_HOME', 'MY_SESSION']);
+  const childEnv = watcher.narrationChildEnv({
+    PATH: 'bin', CLAUDE_AGENT_SDK_VERSION: '0', ANTHROPIC_API_KEY: 'present',
+  });
+  assert.equal(childEnv.PATH, 'bin');
+  assert.equal(childEnv.CLAUDE_AGENT_SDK_VERSION, '0');
+  assert.equal(childEnv.ANTHROPIC_API_KEY, 'present');
+  assert.equal(watcher.narrationMayOpen('open', true), false);
+  assert.equal(watcher.narrationMayOpen('open', false), true);
+  assert.equal(watcher.narrationMayOpen('refresh', true), true);
+  const unowned = watcher.claimWatcher({ owner: null, now: 1000, pid: 10, staleMs: 90000 });
+  assert.equal(unowned.act, true);
+  assert.equal(unowned.tookOver, true);
+  assert.equal(unowned.owner.pid, 10);
+  const owned = watcher.claimWatcher({
+    owner: { pid: 10, at: 1000 }, now: 2000, pid: 10, ownerAlive: true, staleMs: 90000,
+  });
+  assert.equal(owned.act, true);
+  assert.equal(owned.tookOver, false);
+  assert.equal(owned.owner.at, 2000);
+  const otherLive = watcher.claimWatcher({
+    owner: { pid: 11, at: 2000 }, now: 3000, pid: 10, ownerAlive: true, staleMs: 90000,
+  });
+  assert.equal(otherLive.act, false);
+  assert.equal(otherLive.tookOver, false);
+  assert.equal(otherLive.owner.pid, 11);
+  const otherDead = watcher.claimWatcher({
+    owner: { pid: 11, at: 2000 }, now: 3000, pid: 10, ownerAlive: false, staleMs: 90000,
+  });
+  assert.equal(otherDead.act, true);
+  assert.equal(otherDead.tookOver, true);
+  const otherStale = watcher.claimWatcher({
+    owner: { pid: 11, at: 1000 }, now: 91000, pid: 10, ownerAlive: true, staleMs: 90000,
+  });
+  assert.equal(otherStale.act, true);
+  assert.equal(otherStale.tookOver, true);
 
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-loop-session-'));
   try {

@@ -231,7 +231,17 @@ one file, not a feature spanning three layers. Then explain to me, briefly:
   beyond its chain base makes the watcher stop the loop, wait, run
   `--reset-stub`, and start it again. A refusal stays a report with the two
   manual steps. A coder that is out of credit is repaired only by
-  `--bench-coder`, which re-checks its own preconditions.
+  `--bench-coder`, which re-checks its own preconditions. Two ceiling kills
+  on the same task in 24 hours are reported, because they do not use a round.
+  The Output channel Agent Loop Watcher logs stage changes, status lines,
+  verdicts, kills and decisions. `AGENT_LOOP_WATCHER_VERBOSE=off` silences it.
+  The command Agent Loop: Show watcher activity opens it.
+  `AGENT_LOOP_WATCHER_NARRATE` is `off` unless set to `problems` or `events`.
+  It explains those facts in a Claude Code session for this workspace. A
+  playbook match is sent at once. Other events are batched, at least
+  `AGENT_LOOP_WATCHER_NARRATE_MIN_S` seconds apart (default 300), and they
+  share the hourly Claude cap. A narration failure is logged. The playbook
+  still runs.
 - Deploy is never automated. The loop stops at `committed`.
 
 Finally, give me a short summary of everything that was configured, and anything

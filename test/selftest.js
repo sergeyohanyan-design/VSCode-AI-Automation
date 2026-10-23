@@ -8,6 +8,7 @@
 const assert = require('node:assert/strict');
 const Module = require('node:module');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..');
@@ -200,6 +201,9 @@ const SHIPPED = [
   path.join(ROOT, 'README.md'),
   path.join(ROOT, 'SETUP.md'),
   path.join(ROOT, 'CHANGELOG.md'),
+  path.join(ROOT, 'AI_Setup.md'),
+  path.join(ROOT, 'CLAUDE.md'),
+  path.join(ROOT, 'CONTRIBUTING.md'),
 ];
 const LEAK_PATTERNS = [
   ['a real ClickUp token', /\bpk_\d{6,}[_A-Z0-9]*/],
@@ -207,13 +211,19 @@ const LEAK_PATTERNS = [
   ['a machine-specific POSIX home path', /\/(?:home|Users)\/(?!Test\b)[A-Za-z0-9._-]+\//],
   ['a hardcoded ClickUp list id', /AGENT_LOOP_LIST_ID\s*(?:\|\||=)\s*['"]\d/],
   ['a ClickUp workspace or list id', /\b\d{10,}\b/],
-  // Incidents are worth writing down; the reporter's board is not. `GP32 re-scoped twice` and a
-  // verbatim `ClickUp 86eyh4bcm` fixture both shipped in src before anyone noticed. Describe the
+  // Incidents are worth writing down; the reporter's board is not. `XY12 re-scoped twice` and a
+  // verbatim `ClickUp ab12cd34e` fixture both shipped in src before anyone noticed. Describe the
   // task, never name it; the placeholder id in a fixture must be numeric, like `ClickUp 123`.
   // The second alternative reads a real id by SHAPE (letters and digits mixed), so it survives a
   // different workspace's prefixes while leaving prose like `ClickUp workspace` alone.
   ['a private board task reference',
     /\bGP\d{1,3}[a-z]?\b|ClickUp\s+(?![0-9]+\b)(?![A-Za-z]+\b)[A-Za-z0-9]{7,}/],
+  // A Claude project directory encodes the workspace path as a drive letter, two dashes, then
+  // the rest of the path. Branch names lowercase the same task label the board pattern catches.
+  ['a Claude projects slug', /\b[A-Za-z]--[A-Za-z0-9]/],
+  ['a non-placeholder UUID',
+    /\b(?!00000000-0000-4000-8000-0000000000[0-9a-f]{2}\b)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i],
+  ['a private task branch', /\btask-gp\d{1,3}[a-z]?-/i],
 ];
 for (const file of SHIPPED) {
   const src = fs.readFileSync(file, 'utf8');
@@ -1135,6 +1145,54 @@ async function watcherChecks() {
   assert.notEqual(decide({ coderActiveBeforeKill: false, lines: [idleKill, idleKill] }).row, 'P17');
   assert.notEqual(decide({ coderActiveBeforeKill: true, lines: [idleKill] }).row, 'P17');
 
+  assert.equal(
+    watcher.taskOf('task1 grok phase: first-write 0m10s last-write 39m37s post-write 0m23s wall 40m00s killed-ceiling'),
+    'task1',
+  );
+  const ceilingPair = (ms, id, coder = 'grok') => [
+    stamp(ms, `✖ ${coder} implement ${id}: [agent-loop] TIMEOUT after 40m00s (ceiling) — killed process tree of pid 9`),
+    stamp(ms + 1, `${id} ${coder} phase: first-write 0m10s last-write 39m37s post-write 0m23s wall 40m00s killed-ceiling`),
+  ];
+  const p19 = decide({ lines: [...ceilingPair(NOW - 2000, 'task1'), ...ceilingPair(NOW - 1000, 'task1')] });
+  assert.equal(p19.row, 'P19');
+  assert.equal(p19.response, 'NOTIFY');
+  assert.equal(p19.action, 'wait');
+  assert.equal(p19.effects.notify, true);
+  assert.equal(p19.effects.kill, false);
+  assert.equal(p19.effects.resetStub, false);
+  assert.equal(p19.effects.bench, false);
+  assert.ok(p19.report.includes('2 times'));
+  assert.ok(p19.report.includes('do not count toward the round limit'));
+  assert.ok(p19.report.includes('AGENT_LOOP_IMPLEMENT_TIMEOUT_S'));
+  assert.notEqual(decide({ lines: ceilingPair(NOW, 'task1') }).row, 'P19');
+  assert.notEqual(decide({
+    lines: [...ceilingPair(NOW - 1000, 'task1'), ...ceilingPair(NOW, 'task2')],
+  }).row, 'P19');
+  assert.notEqual(decide({
+    lines: [
+      stamp(NOW, 'task1 grok phase: first-write 1:00 last-write 2:00 wall 2:10 killed-idle'),
+      stamp(NOW + 1000, 'task1 grok phase: first-write 1:00 last-write 2:00 wall 2:10 killed-idle'),
+    ],
+  }).row, 'P19');
+  assert.notEqual(decide({
+    lines: [...ceilingPair(NOW - 25 * 60 * 60 * 1000, 'task1'), ...ceilingPair(NOW, 'task1')],
+  }).row, 'P19');
+  const p19Again = decide({ lines: [] }, p19.memory);
+  assert.equal(p19Again.row, 'P19');
+  assert.equal(p19Again.effects.notify, false);
+  const p19Other = decide({
+    lines: [...ceilingPair(NOW - 500, 'task2'), ...ceilingPair(NOW, 'task2')],
+  }, p19.memory);
+  assert.equal(p19Other.row, 'P19');
+  assert.equal(p19Other.signature, 'P19:task2');
+  assert.equal(p19Other.effects.notify, true);
+  assert.equal(decide({
+    lines: [...ceilingPair(NOW - 1000, 'task1', 'claude'), ...ceilingPair(NOW, 'task1', 'claude')],
+  }).row, 'P19');
+  assert.equal(decide({
+    lines: [...ceilingPair(NOW - 1000, 'task1', 'codex'), ...ceilingPair(NOW, 'task1', 'codex')],
+  }).row, 'P19');
+
   const userStop = decide({
     ...wedge(),
     stopFlag: 'requested 2026-10-22T11:00:00.000Z from the Agent Loop button\n',
@@ -1309,6 +1367,120 @@ async function watcherChecks() {
     wait: async () => {},
     timeoutMs: 0,
   }), false);
+
+  const started = watcher.notableEvents({
+    lines: [stamp(NOW, '… grok implement task1 0:30/20:00 idle 0:10/8:00')],
+  });
+  assert.equal(started.events.length, 1);
+  assert.equal(started.events[0].kind, 'stage');
+  assert.equal(started.events[0].stage, 'implement');
+  assert.equal(started.events[0].taskId, 'task1');
+  const repeatedTick = watcher.notableEvents({
+    lines: [stamp(NOW + 1000, '… grok implement task1 1:00/20:00 idle 0:01/8:00')],
+    previous: started.state,
+  });
+  assert.equal(repeatedTick.events.length, 0);
+  const moved = watcher.notableEvents({
+    lines: [
+      stamp(NOW, 'task1 → coding'),
+      stamp(NOW, 'task1 codex=pass'),
+      stamp(NOW, 'task1 Claude adjudication=fail'),
+      stamp(NOW, 'task1 grok phase: wall 40m00s killed-ceiling'),
+    ],
+  });
+  assert.deepEqual(moved.events.map(event => event.kind), ['status', 'verdict', 'verdict', 'kill']);
+  const fromHeartbeat = watcher.notableEvents({
+    heartbeat: { stage: 'verify' },
+    previous: { stage: 'implement', stageTask: 'task1' },
+  });
+  assert.equal(fromHeartbeat.events.length, 1);
+  assert.equal(fromHeartbeat.events[0].text, 'task1 stage verify');
+
+  const stageEvent = { kind: 'stage', text: 'task1 stage implement' };
+  const rowEvent = {
+    kind: 'playbook', row: 'P19', title: 'Implementation ceiling repeat',
+    fixed: 'Split the task.', text: 'P19',
+  };
+  const heldBatch = watcher.planNarration({
+    mode: 'events', now: NOW, minMs: 300000, lastSentAt: NOW - 1000,
+    incoming: [stageEvent], calls: [],
+  });
+  assert.equal(heldBatch.send, false);
+  assert.equal(heldBatch.reason, 'rate');
+  assert.equal(heldBatch.pending.length, 1);
+  const flushed = watcher.planNarration({
+    mode: 'events', now: NOW, minMs: 300000, lastSentAt: NOW - 300000,
+    pending: heldBatch.pending, incoming: [], calls: [],
+  });
+  assert.equal(flushed.send, true);
+  assert.equal(flushed.reason, 'batch');
+  const immediate = watcher.planNarration({
+    mode: 'problems', now: NOW, minMs: 300000, lastSentAt: NOW - 1000,
+    incoming: [rowEvent, stageEvent], calls: [],
+  });
+  assert.equal(immediate.send, true);
+  assert.ok(immediate.items.some(item => item.kind === 'playbook'));
+  assert.ok(!immediate.items.some(item => item.kind === 'stage'));
+  const overBudget = watcher.planNarration({
+    mode: 'events', now: NOW, maxCalls: 4,
+    calls: [NOW - 1, NOW - 2, NOW - 3, NOW - 4], incoming: [rowEvent],
+  });
+  assert.equal(overBudget.send, false);
+  assert.equal(overBudget.reason, 'budget');
+  assert.equal(overBudget.pending.length, 0);
+  assert.ok(overBudget.channelLine);
+  const overflow = watcher.planNarration({
+    mode: 'events', now: NOW, minMs: 300000, lastSentAt: NOW,
+    incoming: Array.from({ length: 40 }, (_, i) => ({ kind: 'status', text: `task1 → s${i}` })),
+  });
+  assert.equal(overflow.send, false);
+  assert.equal(overflow.pending.length, watcher.NARRATION_PENDING_CAP);
+  assert.equal(overflow.pending[overflow.pending.length - 1].text, 'task1 → s39');
+
+  assert.equal(watcher.sessionChangedByOther(null, { exists: true, size: 1, mtimeMs: 1 }), false);
+  assert.equal(watcher.sessionChangedByOther(
+    { size: 1, mtimeMs: 1 }, { exists: true, size: 1, mtimeMs: 1 },
+  ), false);
+  assert.equal(watcher.sessionChangedByOther(
+    { size: 1, mtimeMs: 1 }, { exists: true, size: 2, mtimeMs: 1 },
+  ), true);
+  assert.equal(watcher.sessionChangedByOther({ size: 1, mtimeMs: 1 }, { exists: false }), true);
+
+  const narrArgs = watcher.narrationArgs();
+  assert.ok(!narrArgs.includes('--no-session-persistence'));
+  assert.ok(!narrArgs.includes('--bare'));
+  assert.equal(narrArgs[narrArgs.indexOf('--tools') + 1], '');
+  assert.equal(narrArgs[narrArgs.indexOf('--permission-prompts') + 1], 'none');
+  const stripped = watcher.narrationArgs([...watcher.DEFAULT_CLAUDE_ARGS, '--bare']);
+  assert.ok(!stripped.includes('--bare'));
+  assert.ok(!stripped.includes('--no-session-persistence'));
+  const sessionArg = '00000000-0000-4000-8000-000000000001';
+  const createdCmd = watcher.narrationCommand({ sessionId: sessionArg });
+  assert.ok(createdCmd.includes('--session-id'));
+  assert.ok(!createdCmd.includes('--resume'));
+  assert.ok(!createdCmd.includes('--bare'));
+  const resumedCmd = watcher.narrationCommand({ sessionId: sessionArg, resume: true });
+  assert.ok(resumedCmd.includes('--resume'));
+  assert.ok(!resumedCmd.includes('--no-session-persistence'));
+  const firstPrompt = watcher.narrationPrompt([rowEvent], { first: true });
+  assert.ok(firstPrompt.includes('watcher narrator'));
+  assert.ok(firstPrompt.includes('Do not invent'));
+  assert.ok(firstPrompt.includes('P19'));
+  assert.ok(firstPrompt.includes('Split the task.'));
+  assert.equal(watcher.narrationPrompt([{ text: 'task1 → coding' }], { first: false }), 'task1 → coding');
+
+  const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-loop-session-'));
+  try {
+    const projectDir = path.join(sessionRoot, 'slug');
+    fs.mkdirSync(projectDir);
+    fs.writeFileSync(path.join(projectDir, `${sessionArg}.jsonl`), 'x\n');
+    const stat = watcher.findSessionStat(sessionRoot, sessionArg);
+    assert.equal(stat.exists, true);
+    assert.equal(stat.size, 2);
+    assert.equal(watcher.findSessionStat(sessionRoot, '00000000-0000-4000-8000-000000000002').exists, false);
+  } finally {
+    fs.rmSync(sessionRoot, { recursive: true, force: true });
+  }
 }
 
 watcherChecks().then(() => {

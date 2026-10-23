@@ -26,7 +26,9 @@ const STATE_ENV_KEYS = new Set([
   'AGENT_LOOP_WATCHER', 'AGENT_LOOP_WATCHER_CMD', 'AGENT_LOOP_WATCHER_POLL_S',
   'AGENT_LOOP_WATCHER_MAX_FIXES', 'AGENT_LOOP_WATCHER_MAX_CALLS_PER_H',
   'AGENT_LOOP_WATCHER_REPORT', 'AGENT_LOOP_WATCHER_LOG', 'AGENT_LOOP_WATCHER_STATE',
-  'AGENT_LOOP_WATCHER_CODER_LOGS', 'AGENT_LOOP_IMPLEMENT_TIMEOUT_S',
+  'AGENT_LOOP_WATCHER_CODER_LOGS', 'AGENT_LOOP_WATCHER_VERBOSE',
+  'AGENT_LOOP_WATCHER_NARRATE', 'AGENT_LOOP_WATCHER_NARRATE_MIN_S',
+  'AGENT_LOOP_IMPLEMENT_TIMEOUT_S',
   'AGENT_LOOP_REVIEW_TIMEOUT_S', 'AGENT_LOOP_VERIFY_TIMEOUT_S', 'AGENT_LOOP_VERIFY_SEED_DIRS',
 ]);
 
@@ -354,6 +356,8 @@ let claudeSelfCheck = null;
 let claudeCheckPromise = null;
 let watcherArmedAt = 0;
 let watcherSawDispatcher = false;
+let watcherChannel = null;
+let narrationFlight = false;
 
 function armWatcher() {
   watcherArmedAt = Date.now();
@@ -710,6 +714,21 @@ async function watcherTick() {
     }
     watcherMemory = decision.memory;
     try { watcher.saveMemory(paths.watcherState, watcherMemory); } catch { /* state file is best-effort */ }
+    const extracted = watcher.notableEvents({
+      lines: facts.lines,
+      heartbeat: facts.heartbeat,
+      previous: watcherMemory.eventState,
+    });
+    watcherMemory.eventState = extracted.state;
+    if (watcher.watcherVerbose(env.AGENT_LOOP_WATCHER_VERBOSE)) {
+      for (const event of extracted.events) watcherSay(event.text);
+      if (!decision.quiet && decision.row) watcherSay(`${decision.row} ${decision.title || ''}`.trim());
+      if (!decision.quiet && !decision.row) {
+        const miss = watcher.unmatchedNotable(facts.lines);
+        if (miss) watcherSay(miss.text);
+      }
+    }
+    scheduleNarration(env, paths, facts, decision, extracted.events);
     await applyDecision(decision, paths);
     const present = !!(facts.pidAlive || facts.lockExists || facts.unsafe
       || watcher.isUserStop(facts.stopFlag) || watcher.isWatcherStop(facts.stopFlag));
@@ -722,9 +741,156 @@ async function watcherTick() {
       const paths = statePaths();
       watcher.appendLog(paths.watcherLog, `watcher tick failed: ${e.message}`);
     } catch { /* nothing else we can record */ }
+    try {
+      const env = loadStateEnv();
+      if (watcher.watcherVerbose(env.AGENT_LOOP_WATCHER_VERBOSE)) watcherSay(`watcher error: ${e.message}`);
+    } catch { /* channel is best-effort */ }
   } finally {
     watcherBusy = false;
   }
+}
+
+function watcherSay(line) {
+  if (!vscode.window || typeof vscode.window.createOutputChannel !== 'function') return;
+  if (!watcherChannel) watcherChannel = vscode.window.createOutputChannel('Agent Loop Watcher');
+  watcherChannel.appendLine(String(line));
+}
+
+function narrationSurface(sessionId) {
+  const groups = vscode.window && vscode.window.tabGroups && vscode.window.tabGroups.all || [];
+  let open = false;
+  let active = false;
+  for (const group of groups) {
+    for (const tab of group.tabs || []) {
+      let blob = tab.label || '';
+      try { blob += JSON.stringify(tab.input || {}); } catch { /* not serialisable */ }
+      if (!blob.includes(sessionId)) continue;
+      open = true;
+      if (tab.isActive) active = true;
+    }
+  }
+  return { open, active };
+}
+
+function openNarration(sessionId, preserveFocus) {
+  const column = vscode.ViewColumn && vscode.ViewColumn.Beside;
+  const programmatic = preserveFocus ? { programmatic: 'panel' } : undefined;
+  return vscode.commands.executeCommand(
+    'claude-vscode.editor.open', sessionId, undefined, column, undefined, true, programmatic,
+  );
+}
+
+function narrationIncoming(decision, events, lines) {
+  const incoming = [];
+  if (decision && !decision.quiet && decision.row) {
+    incoming.push({
+      kind: 'playbook', row: decision.row, title: decision.title || '',
+      fixed: decision.humanFix || '', text: decision.logLine || decision.row,
+    });
+  } else if (decision && !decision.quiet) {
+    const miss = watcher.unmatchedNotable(lines);
+    if (miss) incoming.push(miss);
+  }
+  for (const event of events || []) incoming.push(event);
+  return incoming;
+}
+
+function scheduleNarration(env, paths, facts, decision, events) {
+  const mode = watcher.narrationMode(env.AGENT_LOOP_WATCHER_NARRATE);
+  if (mode === 'off' || !watcherMemory) return;
+  const now = Date.now();
+  const narration = watcher.copyNarration(watcherMemory.narration);
+  const incoming = narrationIncoming(decision, events, facts.lines);
+  if (narrationFlight) {
+    narration.pending = [...narration.pending, ...incoming].slice(-watcher.NARRATION_PENDING_CAP);
+    watcherMemory.narration = narration;
+    try { watcher.saveMemory(paths.watcherState, watcherMemory); } catch { /* state file is best-effort */ }
+    return;
+  }
+  const plan = watcher.planNarration({
+    mode, now, incoming, pending: narration.pending,
+    lastSentAt: narration.lastSentAt,
+    minMs: watcher.narrationMinMs(env.AGENT_LOOP_WATCHER_NARRATE_MIN_S),
+    maxCalls: numberSetting(env.AGENT_LOOP_WATCHER_MAX_CALLS_PER_H, 4),
+    calls: watcherMemory.claudeCalls || [],
+  });
+  narration.pending = plan.pending || [];
+  if (!plan.send) {
+    if (plan.reason === 'budget' && plan.channelLine) {
+      if (!narration.budgetNotedAt || now - narration.budgetNotedAt >= 60 * 60 * 1000) {
+        watcherSay(plan.channelLine);
+        try { watcher.appendLog(paths.watcherLog, plan.channelLine); } catch { /* log is best-effort */ }
+        narration.budgetNotedAt = now;
+      }
+    }
+    watcherMemory.narration = narration;
+    try { watcher.saveMemory(paths.watcherState, watcherMemory); } catch { /* state file is best-effort */ }
+    return;
+  }
+  const cwd = repoRoot();
+  if (!cwd) {
+    watcherSay('narration skipped: no workspace folder');
+    watcherMemory.narration = narration;
+    return;
+  }
+  const runId = (facts.lock && facts.lock.nonce) || (facts.heartbeat && facts.heartbeat.nonce) || null;
+  if (narration.runId && runId && narration.runId !== runId) {
+    narration.sessionId = null;
+    narration.stamp = null;
+  }
+  const projects = path.join(os.homedir(), '.claude', 'projects');
+  if (narration.sessionId && watcher.sessionChangedByOther(
+    narration.stamp, watcher.findSessionStat(projects, narration.sessionId),
+  )) {
+    const note = 'narration session was edited outside the watcher; starting a new one';
+    watcherSay(note);
+    try { watcher.appendLog(paths.watcherLog, note); } catch { /* log is best-effort */ }
+    narration.sessionId = null;
+    narration.stamp = null;
+  }
+  const sessionId = narration.sessionId || watcher.narrationSessionId();
+  const first = !narration.sessionId;
+  const prompt = watcher.narrationPrompt(plan.items, { first });
+  const command = watcher.narrationCommand({ sessionId, resume: !first }).map(watcher.quoteCmdArg).join(' ');
+  narration.pending = [];
+  watcherMemory.narration = narration;
+  narrationFlight = true;
+  let child;
+  try {
+    child = watcher.spawnCaptured(command, {
+    input: prompt, cwd, timeoutMs: watcher.CLAUDE_TIMEOUT_MS,
+  }).then(result => {
+    if (!watcherMemory) return;
+    const state = watcher.copyNarration(watcherMemory.narration);
+    watcherMemory.claudeCalls = [...(watcherMemory.claudeCalls || []), Date.now()];
+    if (!result.ok) {
+      const why = result.why || result.err || 'narration failed';
+      watcherSay(`narration failed: ${why}`);
+      try { watcher.appendLog(paths.watcherLog, `narration failed: ${why}`); } catch { /* log is best-effort */ }
+      watcherMemory.narration = state;
+    } else {
+      state.sessionId = sessionId;
+      state.runId = runId || state.runId;
+      state.lastSentAt = Date.now();
+      const stat = watcher.findSessionStat(projects, sessionId);
+      if (stat.exists) state.stamp = { size: stat.size, mtimeMs: stat.mtimeMs };
+      watcherMemory.narration = state;
+      const surface = narrationSurface(sessionId);
+      if (first || (surface.open && surface.active)) {
+        void openNarration(sessionId, !first).catch(e => watcherSay(`narration open failed: ${e.message}`));
+      }
+    }
+    try { watcher.saveMemory(paths.watcherState, watcherMemory); } catch { /* state file is best-effort */ }
+  }).catch(e => {
+    watcherSay(`narration failed: ${e.message}`);
+    try { watcher.appendLog(paths.watcherLog, `narration failed: ${e.message}`); } catch { /* log is best-effort */ }
+  }).finally(() => { narrationFlight = false; });
+  } catch (e) {
+    narrationFlight = false;
+    watcherSay(`narration failed: ${e.message}`);
+    try { watcher.appendLog(paths.watcherLog, `narration failed: ${e.message}`); } catch { /* log is best-effort */ }
+  }
+  void child;
 }
 
 function openWatcherReport() {
@@ -748,6 +914,10 @@ function activate(context) {
     }),
     vscode.commands.registerCommand('agentLoop.recover', recoverUnsafeStop),
     vscode.commands.registerCommand('agentLoop.openWatcherReport', () => openWatcherReport()),
+    vscode.commands.registerCommand('agentLoop.showWatcherActivity', () => {
+      if (!watcherChannel) watcherChannel = vscode.window.createOutputChannel('Agent Loop Watcher');
+      watcherChannel.show(false);
+    }),
   );
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);

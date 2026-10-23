@@ -67,7 +67,14 @@ Beyond the routing, the parts that matter in practice:
   A refusal stays a report with the two manual steps. A coder that is out of
   credit can be benched only through a dispatcher command that re-checks the
   preconditions. Your own Safe Stop is never restarted. A process that keeps
-  spinning after that stop is killed, and the loop stays stopped. The report is
+  spinning after that stop is killed, and the loop stays stopped. A coder killed
+  by the implementation ceiling twice on the same task is reported: those kills
+  do not count toward the round limit, so the churn guard cannot see them.
+  While the loop runs, the Output channel **Agent Loop Watcher** logs stage
+  changes, status lines, verdicts, kills and playbook decisions. It does not
+  log a line on every poll. Set `AGENT_LOOP_WATCHER_VERBOSE=off` to keep it
+  quiet. `AGENT_LOOP_WATCHER_NARRATE` can also explain those events in a Claude
+  Code session for this workspace (`off` by default). The report is
   `~/.agent-loop-watcher-report.md`.
 - **Reviewers only ever see the task's own work.** The review diff is taken from the merge base
   with the base branch, never from its moving tip. A hotfix landing on `main` while a task is open
@@ -166,7 +173,7 @@ what you don't need — two keys are required, everything else has a working def
 | **Agent commands** | the full CLI invocation for each agent — change model, flags, or binary; the Codex availability check (default `codex login status`, no tokens); Codex reviews default to medium reasoning |
 | **Timing** | poll interval, churn cap, per-stage timeouts, implement idle-progress cap, CLI turn budget, opt-in forge check wait, retry policy |
 | **State files** | lock, stop flag, log, handover report, heartbeat, churn tally, rescue manifest |
-| **Watcher** | on/auto/off, poll, Claude command, fix cap, hourly Claude cap, report, log, offset file, coder log paths |
+| **Watcher** | on/auto/off, poll, Claude command, fix cap, hourly Claude cap, report, log, offset file, coder log paths, verbose Output channel, optional Claude narration |
 
 Nothing about your board's vocabulary is hardcoded. If your workflow spells things differently,
 override the names; no code change is needed. `npm test` enforces this — a setting the dispatcher
@@ -186,6 +193,7 @@ reads but the example never documents fails the build.
 | **Agent Loop: Open last handover report** | What the last Safe Stop left behind. |
 | **Agent Loop: Recover unsafe stop** | Commit preserved sandbox work after an unsafe-child stop, if no descendant is still alive. |
 | **Agent Loop: Open the watcher report** | What the watcher last decided, and what to do next. |
+| **Agent Loop: Show watcher activity** | Open the Agent Loop Watcher output channel. |
 
 ---
 

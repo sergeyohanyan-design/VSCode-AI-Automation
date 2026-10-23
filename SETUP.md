@@ -300,7 +300,17 @@ loop runs, a stub with no commits beyond its chain base and no remote makes
 the watcher stop the loop, wait until it exits, run `--reset-stub`, and start
 it again. A refusal stays a report with the two manual steps. A coder that is
 out of credit is benched for at most 24 hours (`--bench-coder`). Both commands
-re-check their own preconditions.
+re-check their own preconditions. Two implementation-ceiling kills on the
+same task in 24 hours are reported. Those kills do not use a round, so raise
+`AGENT_LOOP_IMPLEMENT_TIMEOUT_S` or split the task. The Output channel
+**Agent Loop Watcher** shows stage changes, status lines, verdicts, kills and
+decisions, not a line on every poll (`AGENT_LOOP_WATCHER_VERBOSE=off` silences
+it). **Agent Loop: Show watcher activity** opens that channel.
+`AGENT_LOOP_WATCHER_NARRATE=problems` or `events` explains the same facts in a
+Claude Code session for this folder. The default is `off`. A match is sent at
+once. Other events wait `AGENT_LOOP_WATCHER_NARRATE_MIN_S` seconds (default
+300) and share the hourly Claude cap. A failed narration is logged and the
+playbook keeps going.
 
 ---
 

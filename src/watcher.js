@@ -63,6 +63,7 @@ const TITLES = {
   P15: 'Re-scope loop',
   P16: 'Wrong repository',
   P17: 'Idle kill during real work',
+  P19: 'Implementation ceiling repeat',
   P18: 'Unknown problem',
   'user-stop': 'User Safe Stop',
   'watcher-stop': 'Watcher Safe Stop',
@@ -332,11 +333,35 @@ function claudeOnPath() {
   } catch { return false; }
 }
 
+function emptyNarration() {
+  return {
+    sessionId: null, stamp: null, lastSentAt: null, pending: [],
+    budgetNotedAt: null, runId: null,
+  };
+}
+
+function copyNarration(value) {
+  const n = value && typeof value === 'object' ? value : {};
+  const stamp = n.stamp && Number.isFinite(n.stamp.size) && Number.isFinite(n.stamp.mtimeMs)
+    ? { size: n.stamp.size, mtimeMs: n.stamp.mtimeMs }
+    : null;
+  return {
+    sessionId: typeof n.sessionId === 'string' && n.sessionId ? n.sessionId : null,
+    stamp,
+    lastSentAt: Number.isFinite(n.lastSentAt) ? n.lastSentAt : null,
+    pending: Array.isArray(n.pending) ? n.pending.slice(-NARRATION_PENDING_CAP) : [],
+    budgetNotedAt: Number.isFinite(n.budgetNotedAt) ? n.budgetNotedAt : null,
+    runId: typeof n.runId === 'string' && n.runId ? n.runId : null,
+  };
+}
+
 function emptyMemory() {
   return {
     offset: 0, fixes: {}, claudeCalls: [], probed: {}, holds: {}, notified: {},
     errors: [], quietUntil: {}, lastPass: null, keptLines: [], runId: null,
     stubRepair: null, commitCounts: {},
+    narration: emptyNarration(),
+    eventState: { stage: null, stageTask: null },
   };
 }
 
@@ -359,6 +384,11 @@ function cloneMemory(memory = {}) {
       ? { taskId: memory.stubRepair.taskId || null, line: memory.stubRepair.line || null }
       : null,
     commitCounts: copyCommitCounts(memory.commitCounts),
+    narration: copyNarration(memory.narration),
+    eventState: {
+      stage: memory.eventState && memory.eventState.stage || null,
+      stageTask: memory.eventState && memory.eventState.stageTask || null,
+    },
   };
 }
 
@@ -378,6 +408,8 @@ function clearRunState(mem) {
   mem.runId = null;
   mem.stubRepair = null;
   mem.commitCounts = {};
+  mem.narration = emptyNarration();
+  mem.eventState = { stage: null, stageTask: null };
 }
 
 function forgetRun(memory) {
@@ -677,6 +709,28 @@ function matchP17(lines, facts) {
   return null;
 }
 
+// One kill writes a TIMEOUT line and a phase line. Only the phase line that says
+// killed-ceiling counts, so the pair is one kill. Idle kills are P17.
+function matchP19(lines, now) {
+  const hits = findBodies(lines, /killed-ceiling/);
+  const byTask = new Map();
+  for (const line of hits) {
+    const at = lineAt(line);
+    if (at != null && now - at > 24 * 60 * 60 * 1000) continue;
+    const id = taskOf(lineBody(line));
+    if (!id) continue;
+    if (!byTask.has(id)) byTask.set(id, []);
+    byTask.get(id).push(line);
+  }
+  const repeats = [];
+  for (const [taskId, group] of byTask) {
+    if (group.length >= 2) {
+      repeats.push({ taskId, count: group.length, line: group[group.length - 1] });
+    }
+  }
+  return repeats;
+}
+
 function fixedText(row, extra = {}) {
   const steps = {
     P1: 'The watcher kills the stuck process tree, clears the lock and the stop flag, and starts the loop again. A coding task that already has commits is moved to review on the next start.',
@@ -698,6 +752,7 @@ function fixedText(row, extra = {}) {
       : 'The same task was re-scoped twice in 24 hours. Read the latest diagnosis before it cycles again.',
     P16: 'The loop was started in a repository that does not contain the configured seed paths. Stop it and start it from the right folder.',
     P17: 'Raise AGENT_LOOP_IMPLEMENT_IDLE_S. The coder was still working. Do not blame the agent.',
+    P19: `The coder hit the ceiling ${extra.count} times on the same task. These kills do not count toward the round limit. Split the task or raise AGENT_LOOP_IMPLEMENT_TIMEOUT_S.`,
     P18: extra.humanFix || 'Read the report and decide whether to leave the loop running.',
     'user-stop': 'The button or another user action requested Safe Stop. The watcher will wait for the loop to exit and will not start it again.',
   };
@@ -781,6 +836,15 @@ function matchPlaybook(facts, now) {
   }
   const p17 = matchP17(lines, facts);
   if (p17) return { row: 'P17', response: 'NOTIFY', action: 'wait', line: p17 };
+  const p19 = matchP19(lines, now);
+  if (p19.length) {
+    const pick = p19[0];
+    return {
+      row: 'P19', response: 'NOTIFY', action: 'wait',
+      line: pick.line, count: pick.count, taskId: pick.taskId,
+      signature: `P19:${pick.taskId}`, repeats: p19,
+    };
+  }
   const limit = Number.isFinite(facts.stageLimitMs)
     ? facts.stageLimitMs
     : stageLimitMs(facts.heartbeat && facts.heartbeat.stage, facts.env);
@@ -970,6 +1034,15 @@ function evaluate(facts = {}, memory = {}, claude) {
   }
 
   let hit = matchPlaybook(seen, now);
+  if (hit && hit.row === 'P19' && Array.isArray(hit.repeats)) {
+    const open = hit.repeats.find(item => !mem.notified[`P19:${item.taskId}`]);
+    const pick = open || hit.repeats[0];
+    hit = {
+      row: 'P19', response: 'NOTIFY', action: 'wait',
+      line: pick.line, count: pick.count, taskId: pick.taskId,
+      signature: `P19:${pick.taskId}`,
+    };
+  }
   if (!hit) {
     const repeated = repeatedError(mem);
     if (repeated) hit = { row: 'P18', response: 'NOTIFY', action: 'ask_claude', line: repeated.sig, frozen: false, signature: repeated.sig };
@@ -1166,6 +1239,7 @@ function finish(facts, mem, now, hit, claude) {
     logLine: redact(logLine),
     memory: mem,
     summary: `${TITLES[hit.row] || hit.row}: ${humanFix}`.slice(0, 240),
+    humanFix,
     refused,
     quiet: false,
     signature,
@@ -1414,11 +1488,174 @@ async function sampleProcess(pid, opts = {}) {
   }
 }
 
+const NARRATION_PENDING_CAP = 30;
+const NARRATION_MIN_MS = 300 * 1000;
+
+function watcherVerbose(value) {
+  if (value == null || String(value).trim() === '') return true;
+  return !/^(off|false|0|no)$/i.test(String(value).trim());
+}
+
+function narrationMode(value) {
+  const mode = String(value || 'off').trim().toLowerCase();
+  if (mode === 'problems' || mode === 'events') return mode;
+  return 'off';
+}
+
+function narrationMinMs(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return NARRATION_MIN_MS;
+  return Math.floor(n * 1000);
+}
+
+function narrationArgs(base = DEFAULT_CLAUDE_ARGS) {
+  return base.filter(arg => arg !== '--no-session-persistence' && arg !== '--bare');
+}
+
+function narrationCommand({ sessionId, resume = false } = {}, base) {
+  const args = narrationArgs(base);
+  const at = args.indexOf('-p');
+  args.splice(at >= 0 ? at + 1 : args.length, 0, resume ? '--resume' : '--session-id', sessionId);
+  return args;
+}
+
+function narrationSessionId(randomUUID) {
+  const make = randomUUID || (() => require('crypto').randomUUID());
+  return make();
+}
+
+// A recorded size and mtime is the watcher's own write. Any other change means
+// the human typed in the session, so the next turn starts a new one.
+function sessionChangedByOther(recorded, current) {
+  if (!recorded || !Number.isFinite(recorded.size) || !Number.isFinite(recorded.mtimeMs)) return false;
+  if (!current || current.exists === false) return true;
+  return current.size !== recorded.size || current.mtimeMs !== recorded.mtimeMs;
+}
+
+function findSessionStat(root, sessionId, fsApi = fs) {
+  if (!root || !sessionId) return { exists: false };
+  let names = [];
+  try { names = fsApi.readdirSync(root, { withFileTypes: true }); }
+  catch { return { exists: false }; }
+  for (const entry of names) {
+    if (!entry.isDirectory()) continue;
+    const file = path.join(root, entry.name, `${sessionId}.jsonl`);
+    try {
+      const st = fsApi.statSync(file);
+      return { exists: true, size: st.size, mtimeMs: st.mtimeMs };
+    } catch { /* a different project directory */ }
+  }
+  return { exists: false };
+}
+
+// Stage changes, status lines, verdicts and kills. A repeated `… coder stage`
+// heartbeat tick is not an event.
+function notableEvents({ lines = [], heartbeat = null, previous = null } = {}) {
+  let stage = previous && previous.stage || null;
+  let stageTask = previous && previous.stageTask || null;
+  const events = [];
+  for (const line of lines || []) {
+    const body = lineBody(line).trim();
+    const tick = /^…\s+(?:claude|codex|grok)\s+(implement|review|adjudicate|verify|land|probe)\s+(\S+)/i.exec(body);
+    if (tick || /^…\s+/.test(body)) {
+      if (tick) {
+        const nextStage = tick[1].toLowerCase();
+        const taskId = tick[2];
+        if (nextStage !== stage || taskId !== stageTask) {
+          events.push({ kind: 'stage', stage: nextStage, taskId, text: `${taskId} stage ${nextStage}` });
+          stage = nextStage;
+          stageTask = taskId;
+        }
+      }
+      continue;
+    }
+    const status = /^(\S+)\s+→\s+(\S.*)$/.exec(body);
+    if (status) {
+      events.push({
+        kind: 'status', taskId: status[1], status: status[2].trim(),
+        text: `${status[1]} → ${status[2].trim()}`,
+      });
+      continue;
+    }
+    const named = /^(\S+)\s+(?:claude|codex|grok)=(pass|fail)\b/i.exec(body);
+    const adj = /^(\S+)\s+Claude adjudication=(pass|fail)\b/.exec(body);
+    if (named || adj) {
+      events.push({ kind: 'verdict', taskId: (named || adj)[1], text: redact(body) });
+      continue;
+    }
+    if (/killed-ceiling|killed-idle|TIMEOUT after/.test(body)) {
+      events.push({ kind: 'kill', taskId: taskOf(body), text: redact(body) });
+    }
+  }
+  if (heartbeat && heartbeat.stage && heartbeat.stage !== stage) {
+    const taskId = stageTask;
+    events.push({
+      kind: 'stage', stage: heartbeat.stage, taskId,
+      text: taskId ? `${taskId} stage ${heartbeat.stage}` : `stage ${heartbeat.stage}`,
+    });
+    stage = heartbeat.stage;
+  }
+  return { events, state: { stage, stageTask } };
+}
+
+function unmatchedNotable(lines) {
+  const hits = (lines || []).filter(line => /\bFAILED\b|\bFAIL\b|killed-ceiling|killed-idle|TIMEOUT after/.test(lineBody(line)));
+  if (!hits.length) return null;
+  const detail = hits.map(line => redact(lineBody(line).trim())).join('\n');
+  return { kind: 'notable', text: `notable event, no row matched\n${detail}` };
+}
+
+function planNarration({
+  mode = 'off', now = 0, minMs = NARRATION_MIN_MS, maxCalls = 4,
+  calls = [], lastSentAt = null, pending = [], incoming = [],
+} = {}) {
+  if (narrationMode(mode) === 'off') return { send: false, pending: [], reason: 'off' };
+  const selected = narrationMode(mode);
+  const wanted = [];
+  for (const item of incoming || []) {
+    if (item.kind === 'playbook' || item.kind === 'notable') wanted.push(item);
+    else if (selected === 'events' && ['stage', 'status', 'verdict', 'kill', 'error'].includes(item.kind)) wanted.push(item);
+  }
+  const held = [...(pending || []), ...wanted];
+  const recent = (calls || []).filter(t => now - t < CALL_WINDOW_MS);
+  if (held.length && recent.length >= maxCalls) {
+    return {
+      send: false, pending: [], reason: 'budget',
+      channelLine: 'narration skipped: hourly call limit',
+    };
+  }
+  const immediate = held.some(item => item.kind === 'playbook');
+  const queue = held.slice(-NARRATION_PENDING_CAP);
+  if (immediate) return { send: true, items: queue, pending: [], reason: 'row' };
+  const due = lastSentAt == null || now - lastSentAt >= minMs;
+  if (queue.length && due) return { send: true, items: queue, pending: [], reason: 'batch' };
+  return { send: false, pending: queue, reason: queue.length ? 'rate' : 'empty' };
+}
+
+function narrationPrompt(items, { first = false } = {}) {
+  const lines = (items || []).map(item => redact(item.text || '')).filter(Boolean);
+  if (!first) return lines.join('\n');
+  const parts = [
+    'You are the Agent Loop watcher narrator.',
+    'Explain in short, plain sentences what happened, whether it is normal, and what the human should do.',
+    'Nothing is a valid answer.',
+    'Do not invent causes the log does not show.',
+  ];
+  const matched = (items || []).find(item => item.row);
+  if (matched) {
+    parts.push(`Matched ${matched.row}${matched.title ? `: ${matched.title}` : ''}.`);
+    if (matched.fixed) parts.push(redact(matched.fixed));
+  }
+  parts.push('Lines:');
+  parts.push(lines.join('\n'));
+  return parts.join('\n');
+}
+
 module.exports = {
   PHASE2, ACTIONS, DEFAULT_CLAUDE_ARGS, DEFAULT_CLAUDE_CMD, CLAUDE_TIMEOUT_MS,
-  WATCHER_START_GRACE_MS,
+  WATCHER_START_GRACE_MS, NARRATION_PENDING_CAP,
   REPEAT_N, REPEAT_WINDOW_MS, CONFIDENCE_MIN, P7_WINDOW_MS,
-  redact, readNewLog, normalizeSignature, stageLimitMs, tailText, creditExhausted,
+  redact, readNewLog, normalizeSignature, stageLimitMs, tailText, creditExhausted, taskOf,
   isUserStop, isWatcherStop, watcherStopText, identityMatches, preconditions,
   parseClaudeVerdict, evaluate, quoteCmdArg, killProcessTree, settleKill, waitUntilDead, spawnCaptured, runClaude,
   probePlan, runProbes, loadMemory, saveMemory, appendLog, writeReport, newestMtime,
@@ -1426,4 +1663,7 @@ module.exports = {
   emptyMemory, forgetRun, p1Signals, p2Signals, coderWasActiveBeforeKill,
   effectiveWatcherMode, claudeSelfCheckPassed, claudeSelfCheckLog,
   watcherShouldStop, shouldEnsureWatcher, parseStubLine, safeGitRef, appendCommitCounts,
+  watcherVerbose, narrationMode, narrationMinMs, narrationArgs, narrationCommand,
+  narrationSessionId, sessionChangedByOther, findSessionStat, notableEvents,
+  unmatchedNotable, planNarration, narrationPrompt, copyNarration, emptyNarration,
 };

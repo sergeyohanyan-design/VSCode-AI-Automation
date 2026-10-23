@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+
+- The watcher reports P19 when the implementation ceiling kills the same task twice in 24 hours. Only the phase line that says `killed-ceiling` counts, so the timeout line beside it is not a second kill. Idle kills stay on P17. The report says these kills do not count toward the round limit, and to split the task or raise `AGENT_LOOP_IMPLEMENT_TIMEOUT_S`. The watcher does not edit the task or the config. A second task still notifies. The same task does not notify again on the next tick.
+- The Output channel **Agent Loop Watcher** logs stage changes, status lines, verdicts, kills, playbook decisions, and a notable failure that matched no row. A repeated heartbeat tick is not logged. `AGENT_LOOP_WATCHER_VERBOSE` defaults to `on`. **Agent Loop: Show watcher activity** reveals the channel.
+- `AGENT_LOOP_WATCHER_NARRATE` (`off` by default, or `problems`, or `events`) explains the same facts in one Claude Code session per dispatcher run. `problems` sends playbook matches and unmatched notable events. `events` also sends state changes, batched at `AGENT_LOOP_WATCHER_NARRATE_MIN_S` (default 300). A playbook match is sent at once. Calls share `AGENT_LOOP_WATCHER_MAX_CALLS_PER_H`. The narrator command drops `--no-session-persistence` and never passes `--bare`. A failure is logged and the tick continues. If the session file was edited outside the watcher, the next turn starts a new session.
+
 ## 1.2.2
 
 - The headless Claude command no longer passes `--bare`. That flag accepts only an API key, so a subscription login failed every call with "Not logged in". When the watcher starts in full mode it sends `Reply with exactly: OK`. A failure is one watcher-log line, and only the playbook runs after that.

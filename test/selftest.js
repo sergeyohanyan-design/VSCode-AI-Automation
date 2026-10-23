@@ -202,7 +202,6 @@ const SHIPPED = [
   path.join(ROOT, 'SETUP.md'),
   path.join(ROOT, 'CHANGELOG.md'),
   path.join(ROOT, 'AI_Setup.md'),
-  path.join(ROOT, 'CLAUDE.md'),
   path.join(ROOT, 'CONTRIBUTING.md'),
 ];
 const LEAK_PATTERNS = [

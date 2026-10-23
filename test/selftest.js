@@ -1589,6 +1589,41 @@ async function watcherChecks() {
   } finally {
     fs.rmSync(sessionRoot, { recursive: true, force: true });
   }
+
+  // A fake home stands in for a live loop. --selftest has to leave its log,
+  // lock and heartbeat byte-identical, or a test line can stop the real watcher.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-loop-home-'));
+  const sentinelLog = Buffer.from('sentinel-log\n');
+  const sentinelLock = Buffer.from('sentinel-lock\n');
+  const sentinelHb = Buffer.from('{"sentinel":true}\n');
+  const logPath = path.join(home, '.agent-loop.log');
+  const lockPath = path.join(home, '.agent-loop.lock');
+  const hbPath = path.join(home, '.agent-loop-heartbeat.json');
+  fs.writeFileSync(logPath, sentinelLog);
+  fs.writeFileSync(lockPath, sentinelLock);
+  fs.writeFileSync(hbPath, sentinelHb);
+  const homeEnv = { ...process.env, USERPROFILE: home, HOME: home };
+  for (const key of [
+    'AGENT_LOOP_ENV', 'AGENT_LOOP_LOG', 'AGENT_LOOP_LOCK', 'AGENT_LOOP_STOP',
+    'AGENT_LOOP_STOP_REPORT', 'AGENT_LOOP_HEARTBEAT_FILE', 'AGENT_LOOP_ROUNDS',
+    'AGENT_LOOP_RESCUE', 'AGENT_LOOP_UNSAFE',
+  ]) delete homeEnv[key];
+  try {
+    const { spawnSync } = require('node:child_process');
+    const ran = spawnSync(process.execPath, [path.join(SRC, 'agent-loop.mjs'), '--selftest'], {
+      cwd: ROOT,
+      env: homeEnv,
+      stdio: 'ignore',
+      timeout: 180000,
+      windowsHide: true,
+    });
+    assert.equal(ran.status, 0, 'dispatcher selftest failed');
+    assert.ok(fs.readFileSync(logPath).equals(sentinelLog), 'selftest wrote the home log');
+    assert.ok(fs.readFileSync(lockPath).equals(sentinelLock), 'selftest wrote the home lock');
+    assert.ok(fs.readFileSync(hbPath).equals(sentinelHb), 'selftest wrote the home heartbeat');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 }
 
 watcherChecks().then(() => {

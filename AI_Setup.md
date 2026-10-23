@@ -241,7 +241,9 @@ one file, not a feature spanning three layers. Then explain to me, briefly:
   Only one window on the machine runs the watcher. Other windows show the
   Output channel and do not act or narrate.
   `AGENT_LOOP_WATCHER_NARRATE` is `off` unless set to `problems` or `events`.
-  It explains those facts in a Claude Code session for this workspace. A
+  Experimental: tested in Cursor; not yet tested in VS Code. It relies on
+  internal Claude Code extension commands (tested with Claude Code extension
+  2.1.309). It explains those facts in a Claude Code session for this workspace. A
   playbook match is sent at once. Other events are batched, at least
   `AGENT_LOOP_WATCHER_NARRATE_MIN_S` seconds apart (default 300), and they
   share the hourly Claude cap. A narration turn succeeds only when Claude

@@ -72,7 +72,7 @@
  *         node agent-loop.mjs            # one pass, then exit
  *         node agent-loop.mjs <taskId>   # force one specific task through the lane
  *         node agent-loop.mjs --check    # token + board + required-status probe, no agents
- *         node agent-loop.mjs --selftest # unit-test the verdict parser, no network
+ *         node agent-loop.mjs --selftest # offline checks; state files stay in a temp directory
  *
  * SINGLE INSTANCE: two --watch instances race on the shared git tree and corrupt each other.
  *   A PID lock (~/.agent-loop.lock) refuses a second launch and self-heals a stale lock.
@@ -187,6 +187,24 @@ for (const p of [process.env.AGENT_LOOP_ENV, `${homedir()}/.agent-loop.env`].fil
     }
     break;
   } catch {}
+}
+
+// --selftest must not use the live state files. The env file above may name
+// them, and the watcher reads the log, so a test line there can stop a real
+// loop. Point every state path at a fresh temp directory after that load and
+// before any module-level constant reads process.env. The dispatcher does
+// this itself; a path set by the caller is replaced.
+if (opts.selftest) {
+  const stateDir = mkdtempSync(join(tmpdir(), 'agent-loop-selftest-'));
+  const stateFile = name => join(stateDir, name);
+  process.env.AGENT_LOOP_LOG = stateFile('log');
+  process.env.AGENT_LOOP_LOCK = stateFile('lock');
+  process.env.AGENT_LOOP_STOP = stateFile('stop');
+  process.env.AGENT_LOOP_HEARTBEAT_FILE = stateFile('heartbeat.json');
+  process.env.AGENT_LOOP_ROUNDS = stateFile('rounds.json');
+  process.env.AGENT_LOOP_RESCUE = stateFile('rescue.json');
+  process.env.AGENT_LOOP_UNSAFE = stateFile('unsafe');
+  process.env.AGENT_LOOP_STOP_REPORT = stateFile('stop-report.md');
 }
 
 // ---------- config ----------

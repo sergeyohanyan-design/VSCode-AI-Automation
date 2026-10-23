@@ -82,6 +82,9 @@ npx @vscode/vsce package
 code --install-extension agent-loop-<version>.vsix
 ```
 
+`npm test` runs the offline selftest. That selftest keeps its log and the other
+state files in a temp directory.
+
 Reload the window. A **`$(gear) Agent Loop: set up`** item appears at the
 bottom-left of the status bar. That label means "not configured yet" — it becomes
 a rocket once it is.
@@ -311,7 +314,9 @@ again only when its signature changes. A ceiling repeat includes the count in
 that signature, so a higher count is one new line. Only one window runs the
 watcher. Any other window writes one Output-channel line and does not act or
 narrate. `AGENT_LOOP_WATCHER_NARRATE=problems` or `events` explains the same
-facts in a Claude Code session for this folder. The default is `off`. A match
+facts in a Claude Code session for this folder. Experimental: tested in
+Cursor; not yet tested in VS Code. It relies on internal Claude Code
+extension commands (tested with Claude Code extension 2.1.309). The default is `off`. A match
 is sent at once. Other events wait `AGENT_LOOP_WATCHER_NARRATE_MIN_S` seconds
 (default 300) and share the hourly Claude cap. A turn is a success only when
 Claude exits 0 and the session file exists, and a resume must make that file

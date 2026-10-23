@@ -78,7 +78,9 @@ Beyond the routing, the parts that matter in practice:
   Only one window on the machine runs the watcher. Another window says so
   once in the Output channel and does not act or narrate.
   `AGENT_LOOP_WATCHER_NARRATE` can also explain those events in a Claude
-  Code session for this workspace (`off` by default). A turn counts as
+  Code session for this workspace (`off` by default). Experimental: tested
+  in Cursor; not yet tested in VS Code. It relies on internal Claude Code
+  extension commands (tested with Claude Code extension 2.1.309). A turn counts as
   success only when Claude exits 0 and the session file is on disk: present
   after the first turn, and larger after a resume. If it is missing, the
   Output channel and the watcher log say once per run that Claude exited 0
@@ -277,6 +279,7 @@ comments for the first few tasks.
 
 Contributions are welcome, subject to [CONTRIBUTING.md](./CONTRIBUTING.md) and the Contributor
 License Agreement in [CLA.md](./CLA.md). `npm test` needs no network, no token and no VS Code.
+Its `--selftest` keeps the log and the other state files in a temp directory.
 
 ## License details
 

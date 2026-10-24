@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.2
+
+- The dispatcher selftest runs every Git command string through `sh -n -c` on Linux. This guards the quoted `%(refname)` format used by the zero-commit remote-branch check; removing those quotes now fails before release.
+
 ## 1.3.1
 
 - The watcher reports P19 when the implementation ceiling kills the same task twice in 24 hours. Only the phase line that says `killed-ceiling` counts, so the timeout line beside it is not a second kill. Idle kills stay on P17. The report says these kills do not count toward the round limit, and to split the task or raise `AGENT_LOOP_IMPLEMENT_TIMEOUT_S`. The watcher does not edit the task or the config. A second task still notifies. The same task does not notify again on the next tick.

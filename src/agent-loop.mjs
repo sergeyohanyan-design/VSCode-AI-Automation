@@ -155,7 +155,7 @@
  *   judgment call) — which runs on Opus. See CMD.claudeRescope below.
  */
 
-import { spawn, execFile, execFileSync } from 'node:child_process';
+import { spawn, execFile, execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { writeFileSync, mkdtempSync, appendFileSync, existsSync, readFileSync, unlinkSync, rmSync, renameSync, statSync, utimesSync, cpSync, watch, mkdirSync, symlinkSync, linkSync, readdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
@@ -1530,13 +1530,37 @@ async function selftest() {
     try { rmSync(stubDir, { recursive: true, force: true }); } catch {}
   }
 
+  // Every git command the dispatcher builds is a shell string. Linux CI runs
+  // dash, which rejects an unquoted ( ) | & < > ; before git starts. Build the
+  // same strings and, on Linux, refuse a command `sh -n` will not parse.
+  let shellSyntax = process.platform !== 'linux';
+  let shellSyntaxDetail = '';
+  try {
+    const commands = dispatcherGitCommands('/tmp/agent-loop syntax');
+    if (process.platform === 'linux') {
+      shellSyntax = true;
+      for (const command of commands) {
+        const parsed = spawnSync('sh', ['-n', '-c', command], { encoding: 'utf8' });
+        if (parsed.error || parsed.status !== 0) {
+          shellSyntax = false;
+          shellSyntaxDetail = `${parsed.error ? parsed.error.code : parsed.status} ${(parsed.stderr || '').trim().slice(0, 160)}`;
+          break;
+        }
+      }
+    }
+  } catch (error) {
+    shellSyntax = false;
+    shellSyntaxDetail = error.message;
+  }
+  if (!shellSyntax) console.log('  git shell syntax probe: failed', shellSyntaxDetail);
+
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
     && cuRetryClass && quotaReset && benchProbe && lockfileFilter && attribution && cpuLiveness && cpuBusySurvives
     && c && d && e && implementCap && idleCap && idleDeadline && idleLive && budgetProbe && phaseProbe && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w
     && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && rescopeBudget && chainBaseSelection && parkedReviewRouting && rollup
     && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication
-    && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe && winJobShutdown && heartbeatFileProbe && stubAndBenchProbe;
-  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} benchProbe=${benchProbe} lockfileFilter=${lockfileFilter} attribution=${attribution} winJobShutdown=${winJobShutdown} heartbeatFile=${heartbeatFileProbe} stubBench=${stubAndBenchProbe})`);
+    && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe && winJobShutdown && heartbeatFileProbe && stubAndBenchProbe && shellSyntax;
+  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} benchProbe=${benchProbe} lockfileFilter=${lockfileFilter} attribution=${attribution} winJobShutdown=${winJobShutdown} heartbeatFile=${heartbeatFileProbe} stubBench=${stubAndBenchProbe} shellSyntax=${shellSyntax})`);
   process.exit(good ? 0 : 1);
 }
 
@@ -3008,6 +3032,84 @@ export function createBranchRefCmd(branch, tip) {
 }
 export function fastForwardBranchRefCmd(branch, tip, old) {
   return `update-ref refs/heads/${branch} ${tip} ${old}`;
+}
+
+// One shell string per git command the dispatcher builds. Keep these in the
+// original string format so the Linux selftest checks what runProc receives.
+export function dispatcherGitCommands(repoPath) {
+  const sha = 'a'.repeat(40);
+  const old = 'b'.repeat(40);
+  const branch = 'agent-loop/task-a-123';
+  const base = 'main';
+  const sandbox = '/tmp/sandbox dir';
+  const startRef = `refs/remotes/origin/${base}`;
+  const shapes = [
+    'init -q',
+    'init -q -b main',
+    'config user.name "Agent Loop Selftest"',
+    'config user.email "agent-loop-selftest@example.invalid"',
+    'config user.email selftest@example.invalid',
+    'config user.name selftest',
+    'config commit.gpgsign false',
+    'config --local credential.helper ""',
+    'config --local core.askPass ""',
+    'config --local remote.pushDefault ""',
+    'add work.txt',
+    'add -A',
+    'commit -q -m base',
+    'commit -q -m task',
+    'commit -q -m canonical-fix',
+    'commit -qm base',
+    'commit -qm extra',
+    'commit -qm pred',
+    'commit -F -',
+    `checkout -q -b ${branch}`,
+    `checkout -q ${branch}`,
+    'checkout -q main',
+    `checkout --detach ${sha}`,
+    `checkout -b ${branch} ${startRef}`,
+    `checkout ${branch}`,
+    'checkout --quiet --detach FETCH_HEAD',
+    'reset --mixed HEAD~1',
+    `reset --mixed ${sha}`,
+    'reset --hard HEAD -q',
+    `merge-base --is-ancestor ${sha} ${old}`,
+    `rev-parse ${sha}`,
+    'rev-parse HEAD',
+    'rev-parse --git-dir',
+    'rev-parse --abbrev-ref HEAD',
+    `rev-parse --verify --quiet refs/heads/${branch}`,
+    `rev-parse --verify --quiet refs/remotes/origin/${branch}`,
+    'remote',
+    'remote remove origin',
+    'remote get-url origin',
+    `branch ${branch}`,
+    `branch ${branch} refs/remotes/origin/${branch}`,
+    `branch -d ${branch}`,
+    createBranchRefCmd(branch, sha),
+    fastForwardBranchRefCmd(branch, sha, old),
+    `update-ref refs/remotes/origin/${branch} HEAD`,
+    'worktree list --porcelain',
+    `fetch "${sandbox}" ${sha}`,
+    `fetch --quiet "${sandbox}" ${sha}`,
+    `log --format=%B%x00 ${base}..${branch}`,
+    'ls-files --others --exclude-standard',
+    'status --porcelain',
+    'status --porcelain --untracked-files=no',
+    `rev-list --count ${base}..${branch}`,
+    'symbolic-ref --quiet --short HEAD',
+    'diff --cached',
+    `diff ${base}...`,
+    `show-ref --verify --quiet refs/heads/${branch}`,
+    `push -u origin ${sha}:refs/heads/${branch}`,
+    'for-each-ref --format="%(refname)" refs/remotes',
+    'clean -fd',
+  ];
+  return [
+    ...shapes.map(args => `git -c credential.interactive=never -C "${repoPath}" ${args}`),
+    `git -c credential.interactive=never clone --local --no-hardlinks "${repoPath}" "${sandbox}"`,
+    `git -c credential.interactive=never clone --local --no-hardlinks "${repoPath}" "/tmp/verify sandbox"`,
+  ];
 }
 
 // Pure: does `git worktree list --porcelain` show `branch` checked out anywhere — the primary tree

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.3
+
+- The dispatcher no longer freezes when a reviewer or adjudicator reply starts with `{` but is not valid JSON, for example an unescaped quote inside a blocker. The verdict parser looped forever on that reply: one core at 100%, no IO, no child process, and Safe Stop could not reach it. Only a kill recovered. The parser now stops at the start of the reply and treats it as unparseable, which the existing retry and "unparseable" paths handle. The dispatcher selftest includes that reply; with the fix removed, `npm test` fails at the selftest's 180-second timeout.
+
 ## 1.3.2
 
 - The dispatcher selftest runs every Git command string through `sh -n -c` on Linux. This guards the quoted `%(refname)` format used by the zero-commit remote-branch check; removing those quotes now fails before release.

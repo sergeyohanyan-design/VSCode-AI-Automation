@@ -387,7 +387,9 @@ export function extractVerdict(out) {
   const ok = s => { try { const j = JSON.parse(s); if (j && typeof j === 'object' && 'verdict' in j) return j; } catch {} return null; };
   let v = ok(out.trim()); if (v) return v;
   const anchor = out.lastIndexOf('"verdict"'); if (anchor === -1) return null;
-  for (let start = out.lastIndexOf('{', anchor); start !== -1; start = out.lastIndexOf('{', start - 1)) {
+  // `start > 0` guard: lastIndexOf('{', -1) returns 0, not -1, when the text starts with '{', so a
+  // reply that starts with '{' but is not valid JSON used to loop forever at 100% CPU.
+  for (let start = out.lastIndexOf('{', anchor); start !== -1; start = start > 0 ? out.lastIndexOf('{', start - 1) : -1) {
     let depth = 0, inStr = false, esc = false;
     for (let k = start; k < out.length; k++) {
       const ch = out[k];
@@ -407,7 +409,10 @@ export function extractVerdict(out) {
 async function selftest() {
   const a = extractVerdict('{"verdict":"pass","blocking_issues":[],"notes":"ok"}');
   const b = extractVerdict('noise\ncodex\n{"verdict":"fail","blocking_issues":["bad {brace} here"],"notes":"see foo{bar}"}\ntokens used 42');
-  const c = LIMIT_RE.test("ERROR: You've hit your usage limit. Try again at Jul 29.") && !extractVerdict("no json here");
+  // The last case starts with '{' but is not valid JSON (unescaped quotes). Before the guard it never
+  // returned; the 180 s spawn timeout in test/selftest.js turns that hang into a failure.
+  const c = LIMIT_RE.test("ERROR: You've hit your usage limit. Try again at Jul 29.") && !extractVerdict("no json here")
+    && !extractVerdict('{"verdict":"fail","blocking_issues":["says "x" twice"],"notes":""}');
   // heartbeat: a labelled child that outlives one interval must tick, and an unlabelled one must not.
   process.env.AGENT_LOOP_HEARTBEAT_S = '1';
   const ticks = [], real = console.log;

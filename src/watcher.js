@@ -582,7 +582,9 @@ function matchP11(lines, now) {
 function matchP12(lines) {
   const fails = lines.filter(line => {
     const body = lineBody(line);
-    return /unavailable \(exit 1\)/.test(body) && !/quota|rate-limit|benched until/i.test(body);
+    // Not "benched until": every failed Codex review is benched, crash or quota. The dispatcher
+    // writes "(quota)" for a real limit, and that is the only bench P12 must skip.
+    return /unavailable \(exit 1\)/.test(body) && !/quota|rate-limit/i.test(body);
   });
   const quick = fails.filter(line => {
     const at = lineAt(line);

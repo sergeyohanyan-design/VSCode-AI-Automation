@@ -4159,7 +4159,10 @@ async function reviewAndResolve(t, reviewer, onPass, escalateWithClaude, claudeU
       if (reviewer === 'codex' && !updated) {
         const until = benchUntil(out, Date.now());
         QUOTA_UNTIL.set('codex', until);
-        retry = `Codex benched until ${new Date(until).toISOString()}${updateNote}`;
+        // "quota" only for a real limit: the watcher's P12 skips quota lines, and must still see a
+        // crashed Codex review (it used to skip every "benched until" line, so it never could).
+        const why = LIMIT_RE.test(out || '') ? ' (quota)' : '';
+        retry = `Codex benched until ${new Date(until).toISOString()}${why}${updateNote}`;
       }
       await tryComment(id, `${emoji} **${who}** reviewer unavailable (crashed/quota/cooldown, exit ${result.code}) — left on **in review** (${retry}).\n\`\`\`\n${out.trim().slice(-600)}\n\`\`\``);
       await setStatus(id, S.review);

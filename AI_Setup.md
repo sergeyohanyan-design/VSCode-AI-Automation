@@ -68,6 +68,9 @@ it — and report its `model` and `service_tier`. Both apply to every Codex revi
 `service_tier = "priority"` is set, tell me it can bill Fast mode at a higher rate
 and that I can remove the line. The loop itself runs reviews at medium reasoning and
 benches Codex after an unavailable review instead of retrying every pass.
+Also report `codex --version`. If a review fails because that CLI does not know the
+configured `model`, the loop runs `codex update` once by itself and retries. Tell me
+this, and that `AGENT_LOOP_CODEX_UPDATE_CMD=` (empty) turns it off if I pin the version.
 
 ### Phase 2 — Work out my project's settings
 

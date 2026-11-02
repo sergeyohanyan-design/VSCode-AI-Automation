@@ -1038,6 +1038,18 @@ async function watcherChecks() {
       stamp(t0 + 80_000, '123 claude unavailable (exit 1)'),
     ],
   }).row, 'P12');
+  // A crashed Codex review is benched too; the bench must not hide it from P12. A quota bench must.
+  const codexFails = tail => decide({
+    lines: [
+      stamp(t0, 'probe codex: available'),
+      stamp(t0, 'review 123 via codex (10 diff lines vs main) [worktree]'),
+      stamp(t0 + 1000, `123 codex unavailable (exit 1) → left in review (Codex benched until 2026-01-01T00:15:00.000Z${tail})`),
+      stamp(t0 + 20_000, 'review 123 via codex (10 diff lines vs main) [worktree]'),
+      stamp(t0 + 21_000, `123 codex unavailable (exit 1) → left in review (Codex benched until 2026-01-01T00:30:00.000Z${tail})`),
+    ],
+  });
+  assert.equal(codexFails('').row, 'P12');
+  assert.notEqual(codexFails(' (quota)')?.row, 'P12');
 
   const p13fast = decide({
     lines: [

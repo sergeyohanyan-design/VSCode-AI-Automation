@@ -353,6 +353,20 @@ export function reviewerUnavailable(verdict, code, out) {
 // instead (it is rejected before inference, so it costs nothing) and benches Codex via QUOTA_UNTIL.
 // It also no longer falls back to AGENT_LOOP_CODEX_CMD: that is an inference command by design.
 const codexProbeCommand = () => process.env.AGENT_LOOP_CODEX_PROBE_CMD || 'codex login status';
+// A Codex CLI older than the model named in ~/.codex/config.toml passes the login probe and then
+// rejects every review: "Model metadata for `<model>` not found" plus a 400 that says the model "is
+// not supported when using Codex with a ChatGPT account" — wording that blames the account, not the
+// version. The Codex desktop app ships its own newer CLI and shares that config file, so picking a
+// new model in the app is enough to strand the copy on PATH. Before this, the loop benched Codex for
+// 15 min and retried forever while the review queue sat parked.
+// Empty AGENT_LOOP_CODEX_UPDATE_CMD turns the self-update off (for a pinned CLI version).
+const STALE_CODEX_RE = /model metadata for .{0,80} not found|model_not_found|model is not supported/i;
+const codexUpdateCommand = () => process.env.AGENT_LOOP_CODEX_UPDATE_CMD ?? 'codex update';
+// ponytail: one update per process. A second identical failure means the model really is not
+// available to the account, so it falls through to the ordinary bench and the watcher's P12 report.
+export function codexUpdatePlan(out, { tried, cmd }) {
+  return !tried && !!cmd && STALE_CODEX_RE.test(out || '');
+}
 const CMD = {
   grok:            (pf, maxTurns = MAX_TURNS) => process.env.AGENT_LOOP_GROK_CMD?.replace('{pf}', pf)
                         || `grok --prompt-file "${pf}" --always-approve --no-plan --max-turns ${maxTurns} --output-format plain`,
@@ -911,6 +925,16 @@ async function selftest() {
     && reviewerUnavailable(null, 0, 'not json, no verdict here') === false
     && reviewerUnavailable({ verdict: 'pass' }, 1, 'anything') === false;
   if (!w) console.log('  reviewerUnavailable probe: failed');
+
+  // A stale Codex CLI gets exactly one self-update: on the real 400 wording, never twice, never
+  // when the operator emptied the update command, and never for an ordinary crash or quota message.
+  const stale400 = "warning: Model metadata for `gpt-x` not found.\nERROR: {\"status\":400,\"error\":{\"message\":\"The 'gpt-x' model is not supported when using Codex with a ChatGPT account.\",\"code\":\"model_not_found\"}}";
+  const codexUpdate = codexUpdatePlan(stale400, { tried: false, cmd: 'codex update' }) === true
+    && codexUpdatePlan(stale400, { tried: true, cmd: 'codex update' }) === false
+    && codexUpdatePlan(stale400, { tried: false, cmd: '' }) === false
+    && codexUpdatePlan('windows sandbox: helper_sandbox_lock_failed', { tried: false, cmd: 'codex update' }) === false
+    && codexUpdatePlan("You've hit your usage limit. Try again at Jul 29.", { tried: false, cmd: 'codex update' }) === false;
+  if (!codexUpdate) console.log('  codex self-update plan probe: failed');
 
   // Codex PASS must always park the exact reviewed SHA on `approved`; Claude availability only
   // decides whether that approved queue can be landed on the NEXT pass.
@@ -1561,11 +1585,11 @@ async function selftest() {
 
   const good = a?.verdict === 'pass' && b?.verdict === 'fail' && b.blocking_issues.length === 1
     && cuRetryClass && quotaReset && benchProbe && lockfileFilter && attribution && cpuLiveness && cpuBusySurvives
-    && c && d && e && implementCap && idleCap && idleDeadline && idleLive && budgetProbe && phaseProbe && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w
+    && c && d && e && implementCap && idleCap && idleDeadline && idleLive && budgetProbe && phaseProbe && reviewCap && verifyCap && timeoutRouting && f && g && h && i && j && k && l && m && historyPlanOk && historyNormalizeOk && historyGitOk && n && o && p && q && verifyPathGuard && branchCheckoutOk && s && t && u && w && codexUpdate
     && codexPassParks && claudeReviewLanding && planningRefused && approvedUnblocks && sandboxChainBase && approvedOrdering && approvedFailureGate && stalledStops && zeroChangeStalls && zeroChangeRouting && rescopePremise && rescopeBlindSpot && rescopeBudget && chainBaseSelection && parkedReviewRouting && rollup
     && descriptionSupplement && targetStatePrompts && descriptionFixExtraction && rescopeInspection && reviewAdjudication
     && seedPlanProbe && seedLive && treeKillProbe && recoverProbe && adjProbe && turnsProbe && ciProbe && chainProbe && forgeProbe && scopeProbe && winJobShutdown && heartbeatFileProbe && stubAndBenchProbe && shellSyntax;
-  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} benchProbe=${benchProbe} lockfileFilter=${lockfileFilter} attribution=${attribution} winJobShutdown=${winJobShutdown} heartbeatFile=${heartbeatFileProbe} stubBench=${stubAndBenchProbe} shellSyntax=${shellSyntax})`);
+  console.log('selftest:', good ? 'OK' : `FAIL (verdicts=${!!(a && b && c)} heartbeat=${d} timeout=${e} implementCap=${implementCap} idleCap=${idleCap} idleDeadline=${idleDeadline} idleLive=${idleLive} budgetProbe=${budgetProbe} phaseProbe=${phaseProbe} reviewCap=${reviewCap} verifyCap=${verifyCap} timeoutRouting=${timeoutRouting} config=${f} lockIdentity=${g} commentNonFatal=${h} lockOwnership=${i} cleanupFatal=${j} codexOverride=${k} stopGate=${l} freshFork=${m} historyPlan=${historyPlanOk} historyNormalize=${historyNormalizeOk} historyGit=${historyGitOk} preserve=${n} agentEnv=${o} createCas=${p} stripProviderKeys=${q} verifyPathGuard=${verifyPathGuard} branchCheckout=${branchCheckoutOk} lockGrace=${s} lockUnsafeFields=${t} markUnsafeChild=${u} reviewerUnavailable=${w} codexUpdate=${codexUpdate} codexPassParks=${codexPassParks} claudeReviewLanding=${claudeReviewLanding} planningRefused=${planningRefused} approvedUnblocks=${approvedUnblocks} sandboxChainBase=${sandboxChainBase} approvedOrdering=${approvedOrdering} approvedFailureGate=${approvedFailureGate} stalledStops=${stalledStops} zeroChangeStalls=${zeroChangeStalls} zeroChangeRouting=${zeroChangeRouting} rescopePremise=${rescopePremise} rescopeBlindSpot=${rescopeBlindSpot} rescopeBudget=${rescopeBudget} chainBaseSelection=${chainBaseSelection} parkedReviewRouting=${parkedReviewRouting} rollup=${rollup} descriptionSupplement=${descriptionSupplement} targetStatePrompts=${targetStatePrompts} descriptionFixExtraction=${descriptionFixExtraction} rescopeInspection=${rescopeInspection} reviewAdjudication=${reviewAdjudication} cuRetryClass=${cuRetryClass} quotaReset=${quotaReset} benchProbe=${benchProbe} lockfileFilter=${lockfileFilter} attribution=${attribution} winJobShutdown=${winJobShutdown} heartbeatFile=${heartbeatFileProbe} stubBench=${stubAndBenchProbe} shellSyntax=${shellSyntax})`);
   process.exit(good ? 0 : 1);
 }
 
@@ -3507,6 +3531,7 @@ export function resetStubPlan({ branchExists, commits, hasRemote, lockAlive }) {
 }
 // A pass probes once, then reviews a whole queue — a bench set mid-pass must stop the rest of it too.
 const codexBenched = () => (QUOTA_UNTIL.get('codex') || 0) > Date.now();
+let codexUpdateTried = false; // see codexUpdatePlan
 
 // Lockfile diffs are machine-generated, often thousands of lines, and not reviewable by reading —
 // yet every line went into the review prompt and was re-sent on each agentic turn. Each one is
@@ -4118,10 +4143,26 @@ async function reviewAndResolve(t, reviewer, onPass, escalateWithClaude, claudeU
     const unavailable = reviewerUnavailable(v, result.code, out);
     if (unavailable) {
       let retry = 'to retry';
-      if (reviewer === 'codex') {
+      let updated = false, updateNote = '';
+      const updateCmd = codexUpdateCommand();
+      if (reviewer === 'codex' && codexUpdatePlan(out, { tried: codexUpdateTried, cmd: updateCmd })) {
+        codexUpdateTried = true;
+        log(`  ${id} codex rejected its configured model — the CLI is likely older than the model; running \`${updateCmd}\``);
+        const up = await runProc(updateCmd, { timeout: 300_000, agent: true, cwd: PROBE_CWD });
+        if (up.killFailed) throw new FatalLoopError('codex self-update timed out and its process tree could not be confirmed stopped', { unsafeChild: true });
+        const detail = (up.out || '').trim().split('\n').filter(Boolean).pop()?.slice(0, 200) || '(no output)';
+        log(`  codex self-update: exit ${up.code}: ${detail}`);
+        updated = up.code === 0;
+        retry = `Codex CLI updated with \`${updateCmd}\`, retrying next pass`;
+        if (!updated) updateNote = `; Codex CLI update failed (exit ${up.code}: ${detail}) — run \`${updateCmd}\` by hand`;
+      }
+      if (reviewer === 'codex' && !updated) {
         const until = benchUntil(out, Date.now());
         QUOTA_UNTIL.set('codex', until);
-        retry = `Codex benched until ${new Date(until).toISOString()}`;
+        // "quota" only for a real limit: the watcher's P12 skips quota lines, and must still see a
+        // crashed Codex review (it used to skip every "benched until" line, so it never could).
+        const why = LIMIT_RE.test(out || '') ? ' (quota)' : '';
+        retry = `Codex benched until ${new Date(until).toISOString()}${why}${updateNote}`;
       }
       await tryComment(id, `${emoji} **${who}** reviewer unavailable (crashed/quota/cooldown, exit ${result.code}) — left on **in review** (${retry}).\n\`\`\`\n${out.trim().slice(-600)}\n\`\`\``);
       await setStatus(id, S.review);

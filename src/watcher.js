@@ -582,7 +582,9 @@ function matchP11(lines, now) {
 function matchP12(lines) {
   const fails = lines.filter(line => {
     const body = lineBody(line);
-    return /unavailable \(exit 1\)/.test(body) && !/quota|rate-limit|benched until/i.test(body);
+    // Not "benched until": every failed Codex review is benched, crash or quota. The dispatcher
+    // writes "(quota)" for a real limit, and that is the only bench P12 must skip.
+    return /unavailable \(exit 1\)/.test(body) && !/quota|rate-limit/i.test(body);
   });
   const quick = fails.filter(line => {
     const at = lineAt(line);
@@ -739,7 +741,7 @@ function fixedText(row, extra = {}) {
     P9: extra.quota ? `The vendor said: ${extra.quota}` : 'Wait for the vendor reset time, then let the loop continue.',
     P10: 'This is the designed wait for the reviewer to come back. Leave the loop running.',
     P11: 'Read the probe output below. Fix the named CLI auth or model setting yourself. The watcher does not edit CLI config.',
-    P12: 'The availability probe passed and the review command failed. Compare the review command with the model the account can use. The watcher does not edit CLI config.',
+    P12: 'The availability probe passed and the review command failed. If the error says the model is not supported or its metadata was not found, the CLI is probably older than the model: run `codex update` (the loop tries this once by itself). Otherwise compare the review command with the model the account can use. The watcher does not edit CLI config.',
     P13: 'The same verify failure is repeating and the branch is not growing. Fix the verify command or the harness. This is not a task-code problem.',
     P14: 'Raise AGENT_LOOP_MAX_TURNS, or split the task.',
     P15: extra.count >= 3

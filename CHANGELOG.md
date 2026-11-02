@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.0
+
+- When a Codex review fails because the CLI does not know the model in `~/.codex/config.toml`, the loop runs `codex update` once and retries on the next pass, instead of benching Codex for 15 minutes and failing the same way forever. The Codex desktop app ships its own newer CLI and shares that config file, so picking a new model in the app can leave the `codex` on PATH too old for it. The error blames the account ("not supported when using Codex with a ChatGPT account"), not the version, and the login probe still passes. The update runs at most once per loop run; a second failure is benched as before and reported. New setting `AGENT_LOOP_CODEX_UPDATE_CMD` (default `codex update`); set it empty to turn this off.
+- The watcher's P12 advice names the stale-CLI case first.
+
 ## 1.3.3
 
 - The dispatcher no longer freezes when a reviewer or adjudicator reply starts with `{` but is not valid JSON, for example an unescaped quote inside a blocker. The verdict parser looped forever on that reply: one core at 100%, no IO, no child process, and Safe Stop could not reach it. Only a kill recovered. The parser now stops at the start of the reply and treats it as unparseable, which the existing retry and "unparseable" paths handle. The dispatcher selftest includes that reply; with the fix removed, `npm test` fails at the selftest's 180-second timeout.

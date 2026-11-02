@@ -41,6 +41,10 @@ uses no tokens, so it must exit 0 on your machine — run it once to confirm. Co
 reviews run at `model_reasoning_effort="medium"`, with lockfile diffs left out of the
 prompt. When a review comes back unavailable (quota, or a crash), Codex is benched
 until the quota reset it reports, or for 15 minutes, instead of retrying every pass.
+If a review fails because the Codex CLI does not know the configured model, the loop
+runs `codex update` once and retries. This happens when the Codex desktop app, which
+has its own newer CLI and shares `~/.codex/config.toml`, picks a new model.
+Set `AGENT_LOOP_CODEX_UPDATE_CMD=` (empty) to turn this off.
 Two things in your own `~/.codex/config.toml` also apply to every review: the
 `model`, and `service_tier`. `service_tier = "priority"` can bill Fast mode at a
 higher rate; remove that line unless you want it.
